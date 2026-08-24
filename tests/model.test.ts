@@ -13,8 +13,9 @@ const ids = (...values: string[]) => {
 
 const now = "2026-08-24T12:00:00.000Z";
 
-test("task list records its origin session", () => {
+test("task list records its schema version and origin session", () => {
   const document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
+  assert.equal(document.version, 1);
   assert.equal(document.originSessionId, "session-1");
 });
 

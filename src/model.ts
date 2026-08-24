@@ -29,6 +29,7 @@ export interface Task {
 }
 
 export interface TaskListDocument {
+  version: 1;
   /** Stable identifier for this document (UUID). */
   id: string;
   /** Pi session identifier that created the document. */
@@ -88,6 +89,7 @@ export interface DeleteMutation {
 }
 
 export type MutationOperation = AddMutation | MoveMutation | UpdateMutation | PopMutation | DeleteMutation;
+export type IdFactory = () => string;
 
 export interface MutationResult {
   document: TaskListDocument;
@@ -99,7 +101,7 @@ export interface MutationResult {
 // ---------------------------------------------------------------------------
 
 export function createTaskList(id: string, originSessionId: string, now: string): TaskListDocument {
-  return { id, originSessionId, createdAt: now, updatedAt: now, active: [], completed: [] };
+  return { version: 1, id, originSessionId, createdAt: now, updatedAt: now, active: [], completed: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +232,7 @@ export function applyMutation(
   source: TaskListDocument,
   mutation: MutationOperation,
   now: string,
-  nextId: () => string,
+  nextId: IdFactory,
 ): MutationResult {
   switch (mutation.action) {
     case "add":
@@ -252,7 +254,7 @@ function applyAdd(
   source: TaskListDocument,
   mutation: AddMutation,
   now: string,
-  nextId: () => string,
+  nextId: IdFactory,
 ): MutationResult {
   const name = requireName(mutation.name);
 
