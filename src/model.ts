@@ -247,13 +247,15 @@ function applyMove(source: TaskListDocument, mutation: MoveMutation, now: string
 
   if (subtaskIndex !== undefined) {
     const parent = source.active[parentIndex];
-    if (parent === undefined || source.active[parentIndex]?.subtasks[subtaskIndex] === undefined) {
+    if (parent === undefined || parent.subtasks[subtaskIndex] === undefined) {
       throw new Error(`Task not found: ${mutation.task}`);
     }
     const doc = cloneDocument(source);
     doc.updatedAt = now;
     const targetParent = doc.active[parentIndex]!;
-    const [item] = targetParent.subtasks.splice(subtaskIndex, 1) as [Subtask];
+    const removed = targetParent.subtasks.splice(subtaskIndex, 1);
+    const item = removed[0];
+    if (item === undefined) throw new Error(`Internal error: subtask splice returned empty array`);
     const dest = moveIndex(mutation.position, targetParent.subtasks.length);
     targetParent.subtasks.splice(dest, 0, item);
     return { document: doc, message: `Moved subtask to position ${mutation.position}` };
@@ -265,7 +267,9 @@ function applyMove(source: TaskListDocument, mutation: MoveMutation, now: string
   }
   const doc = cloneDocument(source);
   doc.updatedAt = now;
-  const [item] = doc.active.splice(parentIndex, 1) as [Task];
+  const removed = doc.active.splice(parentIndex, 1);
+  const item = removed[0];
+  if (item === undefined) throw new Error(`Internal error: task splice returned empty array`);
   const dest = moveIndex(mutation.position, doc.active.length);
   doc.active.splice(dest, 0, item);
   return { document: doc, message: `Moved task "${item.name}" to position ${mutation.position}` };
