@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import test, { type TestContext } from "node:test";
 import { resolveRepositoryRoot, TaskStore } from "../src/store.ts";
 
@@ -11,6 +12,46 @@ async function temporaryRoot(t: TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pi-tasks-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
+}
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
+function startMutator(root: string, id: string, name: string, readyRoot: string, goPath: string) {
+  const script = `
+    import { access, writeFile } from "node:fs/promises";
+    import { join } from "node:path";
+    import { TaskStore } from "./src/store.ts";
+    const { ROOT, ID, NAME, READY_ROOT, GO_PATH } = process.env;
+    await writeFile(join(READY_ROOT, NAME), "ready");
+    while (true) {
+      try { await access(GO_PATH); break; } catch { await new Promise((resolve) => setTimeout(resolve, 2)); }
+    }
+    await new TaskStore(ROOT, { staleLockMs: 1_000, lockTimeoutMs: 2_000, retryDelayMs: 2 })
+      .mutate(ID, { action: "add", name: NAME });
+  `;
+  return spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    env: { ...process.env, ROOT: root, ID: id, NAME: name, READY_ROOT: readyRoot, GO_PATH: goPath },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+async function waitForExit(child: ReturnType<typeof startMutator>): Promise<void> {
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+  const code = await new Promise<number | null>((resolveExit) => child.once("exit", resolveExit));
+  assert.equal(code, 0, stderr);
 }
 
 test("resolveRepositoryRoot uses Git root and falls back to cwd", async () => {
@@ -151,4 +192,28 @@ test("a stale lock is recovered before mutation", async (t) => {
 
   const result = await store.mutate(document.id, { action: "add", name: "Recovered" }, () => "task-a");
   assert.equal(result.document.active[0]?.name, "Recovered");
+});
+
+test("two processes reclaiming one stale lock preserve both mutations", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new TaskStore(root);
+  const document = await store.create("session-a");
+  const lockPath = join(store.fileRoot, `${document.id}.lock`);
+  await mkdir(lockPath);
+  const old = new Date(Date.now() - 5_000);
+  await utimes(lockPath, old, old);
+
+  const readyRoot = join(root, "ready");
+  const goPath = join(root, "go");
+  await mkdir(readyRoot);
+  const first = startMutator(root, document.id, "process-a", readyRoot, goPath);
+  const second = startMutator(root, document.id, "process-b", readyRoot, goPath);
+  await Promise.all([
+    waitForFile(join(readyRoot, "process-a")),
+    waitForFile(join(readyRoot, "process-b")),
+  ]);
+  await writeFile(goPath, "go");
+  await Promise.all([waitForExit(first), waitForExit(second)]);
+
+  assert.deepEqual((await store.read(document.id)).active.map((task) => task.name).sort(), ["process-a", "process-b"]);
 });

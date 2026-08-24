@@ -282,7 +282,7 @@ export class TaskStore {
       } catch (error) {
         if (!isNodeError(error) || error.code !== "EEXIST") throw error;
         if (await this.isStale(lockPath)) {
-          await rm(lockPath, { recursive: true, force: true });
+          await this.reclaimStaleLock(lockPath);
           continue;
         }
         if (Date.now() - startedAt >= this.options.lockTimeoutMs) {
@@ -306,6 +306,24 @@ export class TaskStore {
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") return false;
       throw error;
+    }
+  }
+
+  private async reclaimStaleLock(lockPath: string): Promise<void> {
+    const reclaimPath = `${lockPath}.reclaim`;
+    try {
+      await mkdir(reclaimPath);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") return;
+      throw error;
+    }
+
+    try {
+      if (await this.isStale(lockPath)) {
+        await rm(lockPath, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(reclaimPath, { recursive: true, force: true });
     }
   }
 
