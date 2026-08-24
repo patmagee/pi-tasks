@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyMutation, createTaskList, formatPlainList } from "../src/model.ts";
+import { applyMutation, createTaskList, formatPlainList, type TaskStatus } from "../src/model.ts";
+
+// @ts-expect-error Unsupported statuses must stay outside the public model.
+const unsupportedStatus: TaskStatus = "done";
+void unsupportedStatus;
 
 const ids = (...values: string[]) => {
   let index = 0;
@@ -8,6 +12,11 @@ const ids = (...values: string[]) => {
 };
 
 const now = "2026-08-24T12:00:00.000Z";
+
+test("task list records its origin session", () => {
+  const document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
+  assert.equal(document.originSessionId, "session-1");
+});
 
 test("add pushes parents and inserts at a one-based position", () => {
   let document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
@@ -205,6 +214,16 @@ test("move rejects a reference after the task has been archived", () => {
   document = applyMutation(document, { action: "update", task: "1", status: "completed" }, now, ids()).document;
   assert.throws(
     () => applyMutation(document, { action: "move", task: "1", position: 1 }, now, ids()),
+    /not found/i,
+  );
+});
+
+test("update rejects a reference after the task has been archived", () => {
+  let document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
+  document = applyMutation(document, { action: "add", name: "Solo" }, now, ids("s")).document;
+  document = applyMutation(document, { action: "update", task: "1", status: "completed" }, now, ids()).document;
+  assert.throws(
+    () => applyMutation(document, { action: "update", task: "1", status: "in_progress" }, now, ids()),
     /not found/i,
   );
 });

@@ -11,7 +11,7 @@
 // Types
 // ---------------------------------------------------------------------------
 
-export type TaskStatus = "pending" | "in_progress" | "completed" | "done" | "cancelled";
+export type TaskStatus = "pending" | "in_progress" | "completed";
 
 export interface Subtask {
   id: string;
@@ -32,7 +32,7 @@ export interface TaskListDocument {
   /** Stable identifier for this document (UUID). */
   id: string;
   /** Pi session identifier that created the document. */
-  sessionId: string;
+  originSessionId: string;
   createdAt: string;
   updatedAt: string;
   active: Task[];
@@ -89,9 +89,6 @@ export interface DeleteMutation {
 
 export type MutationOperation = AddMutation | MoveMutation | UpdateMutation | PopMutation | DeleteMutation;
 
-/** @deprecated Use MutationOperation. Kept for backward compatibility. */
-export type Mutation = MutationOperation;
-
 export interface MutationResult {
   document: TaskListDocument;
   message: string;
@@ -101,8 +98,8 @@ export interface MutationResult {
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createTaskList(id: string, sessionId: string, now: string): TaskListDocument {
-  return { id, sessionId, createdAt: now, updatedAt: now, active: [], completed: [] };
+export function createTaskList(id: string, originSessionId: string, now: string): TaskListDocument {
+  return { id, originSessionId, createdAt: now, updatedAt: now, active: [], completed: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -198,8 +195,6 @@ const STATUS_GLYPH: Record<TaskStatus, string> = {
   pending: "○",
   in_progress: "◑",
   completed: "✓",
-  done: "●",
-  cancelled: "✕",
 };
 
 /**
