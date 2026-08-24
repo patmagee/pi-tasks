@@ -11,7 +11,7 @@
 // Types
 // ---------------------------------------------------------------------------
 
-export type TaskStatus = "pending" | "in_progress" | "done" | "cancelled";
+export type TaskStatus = "pending" | "in_progress" | "completed" | "done" | "cancelled";
 
 export interface Subtask {
   id: string;
@@ -36,6 +36,8 @@ export interface TaskListDocument {
   createdAt: string;
   updatedAt: string;
   active: Task[];
+  /** Tasks that have been completed and archived from active. */
+  completed: Task[];
 }
 
 // ---------------------------------------------------------------------------
@@ -64,12 +66,31 @@ export interface UpdateMutation {
   /** Reference string: "N" or "N.M". */
   task: string;
   name?: string;
-  /** Only non-completion statuses may be set here. */
-  status?: "pending" | "in_progress";
-  assignee?: string;
+  /**
+   * Active subtasks accept all three statuses.
+   * Active parents accept pending and in_progress; setting completed archives the task.
+   */
+  status?: "pending" | "in_progress" | "completed";
+  /** Pass null to remove an existing assignee. */
+  assignee?: string | null;
 }
 
-export type Mutation = AddMutation | MoveMutation | UpdateMutation;
+export interface PopMutation {
+  action: "pop";
+}
+
+export interface DeleteMutation {
+  action: "delete";
+  /** Reference string: "N" or "N.M". */
+  task: string;
+  /** Resolve the reference against the completed list. Defaults to active. */
+  section?: "completed";
+}
+
+export type MutationOperation = AddMutation | MoveMutation | UpdateMutation | PopMutation | DeleteMutation;
+
+/** @deprecated Use MutationOperation. Kept for backward compatibility. */
+export type Mutation = MutationOperation;
 
 export interface MutationResult {
   document: TaskListDocument;
@@ -81,17 +102,22 @@ export interface MutationResult {
 // ---------------------------------------------------------------------------
 
 export function createTaskList(id: string, sessionId: string, now: string): TaskListDocument {
-  return { id, sessionId, createdAt: now, updatedAt: now, active: [] };
+  return { id, sessionId, createdAt: now, updatedAt: now, active: [], completed: [] };
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+function cloneTask(t: Task): Task {
+  return { ...t, subtasks: t.subtasks.map((s) => ({ ...s })) };
+}
+
 function cloneDocument(source: TaskListDocument): TaskListDocument {
   return {
     ...source,
-    active: source.active.map((t) => ({ ...t, subtasks: t.subtasks.map((s) => ({ ...s })) })),
+    active: source.active.map(cloneTask),
+    completed: source.completed.map(cloneTask),
   };
 }
 
@@ -121,25 +147,6 @@ function parseReference(value: string): { parentIndex: number; subtaskIndex?: nu
   return { parentIndex: n - 1, subtaskIndex: m - 1 };
 }
 
-function resolveActive(
-  document: TaskListDocument,
-  reference: string,
-): { task: Task | Subtask; parent: Task; parentIndex: number; subtaskIndex?: number } {
-  const { parentIndex, subtaskIndex } = parseReference(reference);
-  const parent = document.active[parentIndex];
-  if (parent === undefined) {
-    throw new Error(`Task not found: ${reference}`);
-  }
-  if (subtaskIndex !== undefined) {
-    const subtask = parent.subtasks[subtaskIndex];
-    if (subtask === undefined) {
-      throw new Error(`Task not found: ${reference}`);
-    }
-    return { task: subtask, parent, parentIndex, subtaskIndex };
-  }
-  return { task: parent, parent, parentIndex };
-}
-
 /**
  * Convert a one-based optional position into a zero-based insertion index.
  * Appends when position is undefined or exceeds the list length.
@@ -159,6 +166,30 @@ function moveIndex(position: number, length: number): number {
   return Math.max(0, Math.min(idx, length));
 }
 
+/**
+ * Throw when any subtask has not yet reached completed status.
+ * Used by both the explicit completion update and the pop shortcut.
+ */
+function requireSubtasksCompleted(task: Task): void {
+  const incomplete = task.subtasks.filter((s) => s.status !== "completed");
+  if (incomplete.length > 0) {
+    throw new Error("Must complete all subtasks before completing a parent task");
+  }
+}
+
+/**
+ * Apply an assignee update to a task or subtask.
+ * undefined: no change. null: remove. string: set.
+ */
+function applyAssignee(target: Task | Subtask, assignee: string | null | undefined): void {
+  if (assignee === undefined) return;
+  if (assignee === null) {
+    delete target.assignee;
+  } else {
+    target.assignee = assignee;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Plain-text formatter
 // ---------------------------------------------------------------------------
@@ -166,20 +197,33 @@ function moveIndex(position: number, length: number): number {
 const STATUS_GLYPH: Record<TaskStatus, string> = {
   pending: "○",
   in_progress: "◑",
+  completed: "✓",
   done: "●",
   cancelled: "✕",
 };
 
-export function formatPlainList(document: TaskListDocument): string {
+/**
+ * Render the task list as a plain-text string.
+ * Pass includeCompleted=true to append a "Completed" section with section-local numbering.
+ */
+export function formatPlainList(document: TaskListDocument, includeCompleted = false): string {
   const lines: string[] = [];
-  document.active.forEach((task, ti) => {
-    const n = ti + 1;
+
+  const renderTask = (task: Task, n: number): void => {
     lines.push(`${n}. ${STATUS_GLYPH[task.status]} ${task.name}`);
     task.subtasks.forEach((sub, si) => {
-      const m = si + 1;
-      lines.push(`  ${n}.${m} ${STATUS_GLYPH[sub.status]} ${sub.name}`);
+      lines.push(`  ${n}.${si + 1} ${STATUS_GLYPH[sub.status]} ${sub.name}`);
     });
-  });
+  };
+
+  document.active.forEach((task, ti) => renderTask(task, ti + 1));
+
+  if (includeCompleted && document.completed.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push("Completed");
+    document.completed.forEach((task, ti) => renderTask(task, ti + 1));
+  }
+
   return lines.join("\n");
 }
 
@@ -189,7 +233,7 @@ export function formatPlainList(document: TaskListDocument): string {
 
 export function applyMutation(
   source: TaskListDocument,
-  mutation: Mutation,
+  mutation: MutationOperation,
   now: string,
   nextId: () => string,
 ): MutationResult {
@@ -200,6 +244,10 @@ export function applyMutation(
       return applyMove(source, mutation, now);
     case "update":
       return applyUpdate(source, mutation, now);
+    case "pop":
+      return applyPop(source, now);
+    case "delete":
+      return applyDelete(source, mutation, now);
     default:
       throw new Error(`Unsupported mutation: ${(mutation as { action: string }).action}`);
   }
@@ -276,24 +324,78 @@ function applyMove(source: TaskListDocument, mutation: MoveMutation, now: string
 }
 
 function applyUpdate(source: TaskListDocument, mutation: UpdateMutation, now: string): MutationResult {
-  resolveActive(source, mutation.task); // validate reference before cloning
+  // Parse once and validate before cloning (avoids a duplicate parse).
+  const { parentIndex, subtaskIndex } = parseReference(mutation.task);
+  const parent = source.active[parentIndex];
+  if (parent === undefined) throw new Error(`Task not found: ${mutation.task}`);
+  if (subtaskIndex !== undefined && parent.subtasks[subtaskIndex] === undefined) {
+    throw new Error(`Task not found: ${mutation.task}`);
+  }
 
   const doc = cloneDocument(source);
   doc.updatedAt = now;
-
-  const { parentIndex, subtaskIndex } = parseReference(mutation.task);
-  const parent = doc.active[parentIndex]!;
+  const targetParent = doc.active[parentIndex]!;
 
   if (subtaskIndex !== undefined) {
-    const sub = parent.subtasks[subtaskIndex]!;
+    const sub = targetParent.subtasks[subtaskIndex]!;
     if (mutation.name !== undefined) sub.name = requireName(mutation.name);
     if (mutation.status !== undefined) sub.status = mutation.status;
-    if (mutation.assignee !== undefined) sub.assignee = mutation.assignee;
+    applyAssignee(sub, mutation.assignee);
     return { document: doc, message: `Updated subtask "${sub.name}"` };
   }
 
-  if (mutation.name !== undefined) parent.name = requireName(mutation.name);
-  if (mutation.status !== undefined) parent.status = mutation.status;
-  if (mutation.assignee !== undefined) parent.assignee = mutation.assignee;
-  return { document: doc, message: `Updated task "${parent.name}"` };
+  // Completing a parent validates subtasks and archives it.
+  if (mutation.status === "completed") {
+    requireSubtasksCompleted(targetParent);
+    if (mutation.name !== undefined) targetParent.name = requireName(mutation.name);
+    applyAssignee(targetParent, mutation.assignee);
+    targetParent.status = "completed";
+    doc.active.splice(parentIndex, 1);
+    doc.completed.push(targetParent);
+    return { document: doc, message: `Completed task "${targetParent.name}"` };
+  }
+
+  if (mutation.name !== undefined) targetParent.name = requireName(mutation.name);
+  if (mutation.status !== undefined) targetParent.status = mutation.status;
+  applyAssignee(targetParent, mutation.assignee);
+  return { document: doc, message: `Updated task "${targetParent.name}"` };
+}
+
+function applyPop(source: TaskListDocument, now: string): MutationResult {
+  const task = source.active[0];
+  if (task === undefined) throw new Error("No active tasks to pop");
+
+  requireSubtasksCompleted(task);
+
+  const doc = cloneDocument(source);
+  doc.updatedAt = now;
+  const popped = doc.active.shift();
+  if (popped === undefined) throw new Error("Internal error: shift returned undefined");
+  popped.status = "completed";
+  doc.completed.push(popped);
+  return { document: doc, message: `Completed task "${popped.name}"` };
+}
+
+function applyDelete(source: TaskListDocument, mutation: DeleteMutation, now: string): MutationResult {
+  const { parentIndex, subtaskIndex } = parseReference(mutation.task);
+  const list = mutation.section === "completed" ? source.completed : source.active;
+
+  const parent = list[parentIndex];
+  if (parent === undefined) throw new Error(`Task not found: ${mutation.task}`);
+
+  if (subtaskIndex !== undefined) {
+    const subtask = parent.subtasks[subtaskIndex];
+    if (subtask === undefined) throw new Error(`Task not found: ${mutation.task}`);
+    const doc = cloneDocument(source);
+    doc.updatedAt = now;
+    const targetList = mutation.section === "completed" ? doc.completed : doc.active;
+    targetList[parentIndex]!.subtasks.splice(subtaskIndex, 1);
+    return { document: doc, message: `Deleted subtask "${subtask.name}"` };
+  }
+
+  const doc = cloneDocument(source);
+  doc.updatedAt = now;
+  const targetList = mutation.section === "completed" ? doc.completed : doc.active;
+  targetList.splice(parentIndex, 1);
+  return { document: doc, message: `Deleted task "${parent.name}"` };
 }
