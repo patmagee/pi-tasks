@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyMutation, createTaskList, formatPlainList, type TaskStatus } from "../src/model.ts";
+import {
+  applyMutation,
+  createTaskList,
+  formatPlainList,
+  getRunnableParentReferences,
+  type TaskListDocument,
+  type TaskStatus,
+} from "../src/model.ts";
 
 // @ts-expect-error Unsupported statuses must stay outside the public model.
 const unsupportedStatus: TaskStatus = "done";
@@ -94,6 +101,26 @@ test("parallel scheduling is parent-only and false returns to the sequential def
     () => applyMutation(document, { action: "update", task: "1.1", parallel: false }, now, ids()),
     /parallel.*parent/i,
   );
+});
+
+test("runnable parent references stop at the first sequential barrier", () => {
+  const document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
+  const withTasks = (parallel: Array<boolean | undefined>): TaskListDocument => ({
+    ...document,
+    active: parallel.map((value, index) => ({
+      id: `task-${index + 1}`,
+      name: `Task ${index + 1}`,
+      status: "pending" as const,
+      ...(value === undefined ? {} : { parallel: value }),
+      subtasks: [],
+    })),
+  });
+
+  assert.deepEqual(getRunnableParentReferences(document), []);
+  assert.deepEqual(getRunnableParentReferences(withTasks([undefined, true])), ["1"]);
+  assert.deepEqual(getRunnableParentReferences(withTasks([false, true])), ["1"]);
+  assert.deepEqual(getRunnableParentReferences(withTasks([true, true, true])), ["1", "2", "3"]);
+  assert.deepEqual(getRunnableParentReferences(withTasks([true, true, false, true])), ["1", "2"]);
 });
 
 test("completed history preserves explicit parallel provenance", () => {

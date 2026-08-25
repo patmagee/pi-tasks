@@ -108,6 +108,18 @@ export function createTaskList(id: string, originSessionId: string, now: string)
   return { version: 1, id, originSessionId, createdAt: now, updatedAt: now, active: [], completed: [] };
 }
 
+export function getRunnableParentReferences(document: TaskListDocument): string[] {
+  if (document.active.length === 0) return [];
+  if (document.active[0]!.parallel !== true) return ["1"];
+
+  const references: string[] = [];
+  for (const [index, task] of document.active.entries()) {
+    if (task.parallel !== true) break;
+    references.push(String(index + 1));
+  }
+  return references;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

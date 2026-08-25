@@ -1,5 +1,5 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import type { Subtask, Task, TaskListDocument } from "./model.ts";
+import { getRunnableParentReferences, type Subtask, type Task, type TaskListDocument } from "./model.ts";
 
 export interface RenderTheme {
   text(value: string): string;
@@ -78,15 +78,41 @@ export function renderFullListLines(document: TaskListDocument, width: number, t
   return lines;
 }
 
+const UNSAFE_AGENT_DATA_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\[\]]/gu;
+
+function escapeUnicodeCodePoint(value: string): string {
+  const codePoint = value.codePointAt(0)!;
+  if (codePoint <= 0xffff) return `\\u${codePoint.toString(16).padStart(4, "0")}`;
+
+  const offset = codePoint - 0x10000;
+  const high = 0xd800 + (offset >> 10);
+  const low = 0xdc00 + (offset & 0x3ff);
+  return `\\u${high.toString(16)}\\u${low.toString(16)}`;
+}
+
+function serializeAgentData(value: string): string {
+  return JSON.stringify(value).replace(UNSAFE_AGENT_DATA_CHARACTER, escapeUnicodeCodePoint);
+}
+
 export function renderAgentSummary(document: TaskListDocument): string {
   const lines: string[] = [];
+  const runnable = new Set(getRunnableParentReferences(document));
+  const parallelWave = document.active[0]?.parallel === true;
+
   for (const [taskIndex, task] of document.active.entries()) {
     const reference = String(taskIndex + 1);
-    const assignee = task.assignee === undefined ? "" : ` @${task.assignee}`;
-    lines.push(`${reference} [${task.status}] ${task.name}${assignee}`);
+    const scheduling = runnable.has(reference)
+      ? parallelWave ? "runnable parallel wave" : "runnable"
+      : "blocked by order";
+    const assignee = task.assignee === undefined ? "" : ` assignee=${serializeAgentData(task.assignee)}`;
+    lines.push(`${reference} [${scheduling}] [${task.status}] name=${serializeAgentData(task.name)}${assignee}`);
     for (const [subtaskIndex, subtask] of task.subtasks.entries()) {
-      const subtaskAssignee = subtask.assignee === undefined ? "" : ` @${subtask.assignee}`;
-      lines.push(`  ${reference}.${subtaskIndex + 1} [${subtask.status}] ${subtask.name}${subtaskAssignee}`);
+      const subtaskAssignee = subtask.assignee === undefined
+        ? ""
+        : ` assignee=${serializeAgentData(subtask.assignee)}`;
+      lines.push(
+        `  ${reference}.${subtaskIndex + 1} [ordered subtask] [${subtask.status}] name=${serializeAgentData(subtask.name)}${subtaskAssignee}`,
+      );
     }
   }
   return lines.join("\n");
