@@ -1,0 +1,494 @@
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import {
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
+import {
+  applyMutation,
+  createTaskList,
+  type IdFactory,
+  type MutationOperation,
+  type MutationResult,
+  type Subtask,
+  type Task,
+  type TaskListDocument,
+  type TaskStatus,
+} from "./model.ts";
+
+const TASK_LIST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const STATUSES = new Set<TaskStatus>(["pending", "in_progress", "completed"]);
+const OWNER_INITIALIZATION_GRACE_MS = 1_000;
+
+export class TaskListNotFoundError extends Error {
+  readonly path: string;
+
+  constructor(path: string) {
+    super(`Task list not found: ${path}`);
+    this.name = "TaskListNotFoundError";
+    this.path = path;
+  }
+}
+
+export interface TaskListCandidate {
+  id: string;
+  updatedAt: string;
+  activeCount: number;
+  completedCount: number;
+  firstTaskName?: string;
+}
+
+export interface TaskListDiscovery {
+  candidates: TaskListCandidate[];
+  errors: string[];
+}
+
+export interface StoreOptions {
+  lockTimeoutMs?: number;
+  staleLockMs?: number;
+  retryDelayMs?: number;
+  now?: () => Date;
+}
+
+interface RequiredStoreOptions {
+  lockTimeoutMs: number;
+  staleLockMs: number;
+  retryDelayMs: number;
+  now: () => Date;
+}
+
+interface LockOwner {
+  token: string;
+  pid: number;
+  acquiredAt: string;
+}
+
+interface ScanFailure {
+  fileName: string;
+  error: Error;
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error;
+}
+
+function assertTaskListId(id: string): void {
+  if (!TASK_LIST_ID.test(id)) {
+    throw new Error(`Invalid task-list identifier: ${id}`);
+  }
+}
+
+function requireRecord(value: unknown, field: string, path: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${path}: ${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireString(value: unknown, field: string, path: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${path}: ${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function parseStatus(value: unknown, field: string, path: string): TaskStatus {
+  if (typeof value !== "string" || !STATUSES.has(value as TaskStatus)) {
+    throw new Error(`${path}: ${field} must be pending, in_progress, or completed`);
+  }
+  return value as TaskStatus;
+}
+
+function parseSubtask(value: unknown, field: string, path: string): Subtask {
+  const record = requireRecord(value, field, path);
+  if ("subtasks" in record) {
+    throw new Error(`${path}: ${field}.subtasks is not supported`);
+  }
+  const subtask: Subtask = {
+    id: requireString(record.id, `${field}.id`, path),
+    name: requireString(record.name, `${field}.name`, path),
+    status: parseStatus(record.status, `${field}.status`, path),
+  };
+  if (record.assignee !== undefined) {
+    subtask.assignee = requireString(record.assignee, `${field}.assignee`, path);
+  }
+  return subtask;
+}
+
+function parseTask(value: unknown, field: string, path: string): Task {
+  const record = requireRecord(value, field, path);
+  if (!Array.isArray(record.subtasks)) {
+    throw new Error(`${path}: ${field}.subtasks must be an array`);
+  }
+  const task: Task = {
+    id: requireString(record.id, `${field}.id`, path),
+    name: requireString(record.name, `${field}.name`, path),
+    status: parseStatus(record.status, `${field}.status`, path),
+    subtasks: record.subtasks.map((subtask, index) => parseSubtask(subtask, `${field}.subtasks[${index}]`, path)),
+  };
+  if (record.assignee !== undefined) {
+    task.assignee = requireString(record.assignee, `${field}.assignee`, path);
+  }
+  return task;
+}
+
+function parseDocument(value: unknown, path: string): TaskListDocument {
+  const record = requireRecord(value, "document", path);
+  if (record.version !== 1) {
+    throw new Error(`${path}: unsupported task-list version ${String(record.version)}`);
+  }
+  const id = requireString(record.id, "id", path);
+  assertTaskListId(id);
+  if (!Array.isArray(record.active)) throw new Error(`${path}: active must be an array`);
+  if (!Array.isArray(record.completed)) throw new Error(`${path}: completed must be an array`);
+
+  const active = record.active.map((task, index) => parseTask(task, `active[${index}]`, path));
+  const completed = record.completed.map((task, index) => parseTask(task, `completed[${index}]`, path));
+  if (active.some((task) => task.status === "completed")) {
+    throw new Error(`${path}: active parent tasks cannot be completed`);
+  }
+  if (completed.some((task) => task.status !== "completed")) {
+    throw new Error(`${path}: completed parent tasks must have completed status`);
+  }
+
+  return {
+    version: 1,
+    id,
+    originSessionId: requireString(record.originSessionId, "originSessionId", path),
+    createdAt: requireString(record.createdAt, "createdAt", path),
+    updatedAt: requireString(record.updatedAt, "updatedAt", path),
+    active,
+    completed,
+  };
+}
+
+async function readDocument(path: string, expectedId?: string): Promise<TaskListDocument> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      throw new TaskListNotFoundError(path);
+    }
+    throw error;
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${path}: invalid JSON: ${message}`);
+  }
+  const document = parseDocument(value, path);
+  if (expectedId !== undefined && document.id !== expectedId) {
+    throw new Error(`${path}: document id does not match filename`);
+  }
+  return document;
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+export async function resolveRepositoryRoot(
+  cwd: string,
+  gitTopLevel: (cwd: string) => Promise<string | undefined> = async () => undefined,
+): Promise<string> {
+  const gitRoot = await gitTopLevel(cwd);
+  const selected = gitRoot?.trim() || cwd;
+  return resolve(isAbsolute(selected) ? selected : resolve(cwd, selected));
+}
+
+export class TaskStore {
+  readonly fileRoot: string;
+  private readonly options: RequiredStoreOptions;
+
+  constructor(repositoryRoot: string, options: StoreOptions = {}) {
+    this.fileRoot = join(resolve(repositoryRoot), ".pi", "tasks");
+    this.options = {
+      lockTimeoutMs: options.lockTimeoutMs ?? 2_000,
+      staleLockMs: options.staleLockMs ?? 30_000,
+      retryDelayMs: options.retryDelayMs ?? 20,
+      now: options.now ?? (() => new Date()),
+    };
+  }
+
+  async create(originSessionId: string): Promise<TaskListDocument> {
+    const id = randomUUID();
+    const path = this.filePath(id);
+    return withFileMutationQueue(path, async () =>
+      this.withLock(id, async () => {
+        const now = this.options.now().toISOString();
+        const document = createTaskList(id, originSessionId, now);
+        await this.writeAtomic(path, document);
+        return document;
+      }),
+    );
+  }
+
+  async createWithMutation(
+    originSessionId: string,
+    operation: MutationOperation,
+    nextId: IdFactory = randomUUID,
+  ): Promise<MutationResult> {
+    const id = randomUUID();
+    const path = this.filePath(id);
+    return withFileMutationQueue(path, async () =>
+      this.withLock(id, async () => {
+        const now = this.options.now().toISOString();
+        const result = applyMutation(createTaskList(id, originSessionId, now), operation, now, nextId);
+        await this.writeAtomic(path, result.document);
+        return result;
+      }),
+    );
+  }
+
+  async read(id: string): Promise<TaskListDocument> {
+    return readDocument(this.filePath(id), id);
+  }
+
+  async discover(): Promise<TaskListCandidate[]> {
+    const { documents, errors } = await this.scanDocuments();
+    if (errors.length > 0) {
+      throw new AggregateError(errors.map((failure) => failure.error), `Could not discover task lists in ${this.fileRoot}`);
+    }
+    return this.toCandidates(documents);
+  }
+
+  async discoverAvailable(): Promise<TaskListDiscovery> {
+    const { documents, errors } = await this.scanDocuments();
+    return {
+      candidates: this.toCandidates(documents),
+      errors: errors.map((failure) => `Unreadable task-list candidate: ${failure.fileName}`),
+    };
+  }
+
+  async mutate(
+    id: string,
+    operation: MutationOperation,
+    nextId: IdFactory = randomUUID,
+  ): Promise<MutationResult> {
+    const path = this.filePath(id);
+    return withFileMutationQueue(path, async () =>
+      this.withLock(id, async () => {
+        const current = await readDocument(path, id);
+        const result = applyMutation(current, operation, this.options.now().toISOString(), nextId);
+        await this.writeAtomic(path, result.document);
+        return result;
+      }),
+    );
+  }
+
+  private filePath(id: string): string {
+    assertTaskListId(id);
+    return join(this.fileRoot, `${id}.json`);
+  }
+
+  private async scanDocuments(): Promise<{ documents: TaskListDocument[]; errors: ScanFailure[] }> {
+    await mkdir(this.fileRoot, { recursive: true });
+    const entries = await readdir(this.fileRoot, { withFileTypes: true });
+    const documents: TaskListDocument[] = [];
+    const errors: ScanFailure[] = [];
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+        .map(async (entry) => {
+          const id = entry.name.slice(0, -5);
+          try {
+            assertTaskListId(id);
+            documents.push(await readDocument(join(this.fileRoot, entry.name), id));
+          } catch (error) {
+            errors.push({
+              fileName: entry.name,
+              error: error instanceof Error ? error : new Error(String(error)),
+            });
+          }
+        }),
+    );
+    return { documents, errors };
+  }
+
+  private toCandidates(documents: TaskListDocument[]): TaskListCandidate[] {
+    return documents
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map((document) => {
+        const candidate: TaskListCandidate = {
+          id: document.id,
+          updatedAt: document.updatedAt,
+          activeCount: document.active.length,
+          completedCount: document.completed.length,
+        };
+        const firstTaskName = document.active[0]?.name ?? document.completed[0]?.name;
+        if (firstTaskName !== undefined) candidate.firstTaskName = firstTaskName;
+        return candidate;
+      });
+  }
+
+  private async withLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    await mkdir(this.fileRoot, { recursive: true });
+    const lockPath = join(this.fileRoot, `${id}.lock`);
+    const token = randomUUID();
+    const startedAt = Date.now();
+    let ownsLock = false;
+
+    while (!ownsLock) {
+      try {
+        await mkdir(lockPath);
+        try {
+          await mkdir(this.ownerMarkerPath(lockPath, token));
+          await this.writeOwner(lockPath, token);
+          ownsLock = true;
+        } catch (error) {
+          await this.releaseOwnedLock(lockPath, token);
+          throw error;
+        }
+      } catch (error) {
+        if (!isNodeError(error) || (error.code !== "EEXIST" && error.code !== "ENOTEMPTY")) throw error;
+        if (await this.isStale(lockPath)) {
+          await this.reclaimStaleLock(lockPath);
+          if (Date.now() - startedAt >= this.options.lockTimeoutMs) {
+            throw new Error(`Timed out waiting for task-list lock: ${lockPath}`);
+          }
+          await delay(this.options.retryDelayMs);
+          continue;
+        }
+        if (Date.now() - startedAt >= this.options.lockTimeoutMs) {
+          throw new Error(`Timed out waiting for task-list lock: ${lockPath}`);
+        }
+        await delay(this.options.retryDelayMs);
+      }
+    }
+
+    try {
+      return await operation();
+    } finally {
+      if (ownsLock) await this.releaseOwnedLock(lockPath, token);
+    }
+  }
+
+  private async isStale(lockPath: string): Promise<boolean> {
+    try {
+      const lockStat = await stat(lockPath);
+      const age = Date.now() - lockStat.mtimeMs;
+      if (age < this.options.staleLockMs) return false;
+      const owner = await this.readOwner(lockPath);
+      if (owner !== undefined) return !this.isProcessAlive(owner.pid);
+      if (await this.hasLiveOwnerMarker(lockPath)) return false;
+      return age >= Math.max(this.options.staleLockMs, OWNER_INITIALIZATION_GRACE_MS);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
+  private async reclaimStaleLock(lockPath: string): Promise<void> {
+    const reclaimPath = `${lockPath}.reclaim`;
+    try {
+      await mkdir(reclaimPath);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") return;
+      throw error;
+    }
+
+    try {
+      if (await this.isStale(lockPath)) {
+        await rm(lockPath, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(reclaimPath, { recursive: true, force: true });
+    }
+  }
+
+  private ownerMarkerPath(lockPath: string, token: string): string {
+    return join(lockPath, `.owner-${process.pid}-${token}`);
+  }
+
+  private async hasLiveOwnerMarker(lockPath: string): Promise<boolean> {
+    try {
+      const entries = await readdir(lockPath, { withFileTypes: true });
+      return entries.some((entry) => {
+        if (!entry.isDirectory()) return false;
+        const match = /^\.owner-(\d+)-.+$/.exec(entry.name);
+        return match !== null && this.isProcessAlive(Number(match[1]));
+      });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
+  private async releaseOwnedLock(lockPath: string, token: string): Promise<void> {
+    const owner = await this.readOwner(lockPath);
+    if (owner !== undefined) {
+      if (owner.token === token) await rm(lockPath, { recursive: true, force: true });
+      return;
+    }
+    try {
+      await stat(this.ownerMarkerPath(lockPath, token));
+      await rm(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+    }
+  }
+
+  private async readOwner(lockPath: string): Promise<LockOwner | undefined> {
+    try {
+      const value = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")) as unknown;
+      if (typeof value !== "object" || value === null) return undefined;
+      const record = value as Record<string, unknown>;
+      if (typeof record.token !== "string" || !Number.isInteger(record.pid) || typeof record.acquiredAt !== "string") {
+        return undefined;
+      }
+      return { token: record.token, pid: record.pid as number, acquiredAt: record.acquiredAt };
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return undefined;
+      if (error instanceof SyntaxError) return undefined;
+      throw error;
+    }
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return !isNodeError(error) || error.code !== "ESRCH";
+    }
+  }
+
+  private async writeOwner(lockPath: string, token: string): Promise<void> {
+    const ownerPath = join(lockPath, "owner.json");
+    const handle = await open(ownerPath, "wx");
+    try {
+      const owner: LockOwner = { token, pid: process.pid, acquiredAt: new Date().toISOString() };
+      await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async writeAtomic(path: string, document: TaskListDocument): Promise<void> {
+    await mkdir(this.fileRoot, { recursive: true });
+    const temporaryPath = join(this.fileRoot, `${document.id}.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      const handle = await open(temporaryPath, "wx");
+      try {
+        await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporaryPath, path);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
+  }
+}

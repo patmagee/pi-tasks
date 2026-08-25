@@ -172,7 +172,7 @@ Register one tool named `task_stack` with these actions:
 | `list` | optional `includeCompleted` | Return active tasks or both sections. |
 | `resume` | optional `taskListId` | Without an identifier, return resume candidates. With an identifier, attach that list. |
 
-`add` in an unattached session creates a new task list and appends a session attachment marker. It does not modify older task lists.
+`add` in an unattached session validates and applies the first task before it writes a new task-list file, then appends a session attachment marker. A failed first add leaves no empty list file and does not modify older task lists.
 
 `resume` without an identifier is discovery only. Candidate results include the task-list identifier, last update time, active count, completed count, and first available task name. The agent calls `resume` again with the selected identifier after the user chooses or clearly identifies a candidate.
 
@@ -232,11 +232,11 @@ Lifecycle behavior:
 
 Each task-list file has an adjacent lock directory. Mutation acquires the lock with an atomic directory creation, reads the latest file, applies one operation, writes a temporary file in the same directory, and atomically renames it over the target.
 
-A bounded lock timeout prevents indefinite waiting. Lock metadata records creation time and process information for diagnostics. A stale-lock policy can recover locks older than the documented threshold because task mutations are short operations.
+A bounded lock timeout prevents indefinite waiting. A token-specific marker protects owner initialization before `owner.json` is complete. Lock metadata records the same ownership token, creation time, and process identifier. A lock older than the documented threshold can be reclaimed only when no recorded or initializing local owner process is alive. Release removes a lock only when its ownership token or initialization marker still matches.
 
 Within one Pi process, mutations also use Pi's file mutation queue for the resolved task-list path. This preserves call order and coordinates with any built-in file tool that targets the same file.
 
-Discovery and list operations do not write. They tolerate a file disappearing during discovery and report malformed candidate files without exposing tasks from them.
+Discovery and list operations do not modify task-list files, although first use can create the `.pi/tasks/` storage directory. The strict store API reports unreadable candidate files as one aggregate error. Explicit resume uses tolerant discovery, which retains valid candidate metadata, reports unreadable files without exposing their task contents, and tolerates a file disappearing during the scan.
 
 ## Agent context after compaction
 

@@ -100,12 +100,21 @@ export function formatPlainList(document: TaskListDocument, includeCompleted?: b
 `src/store.ts` produces:
 
 ```ts
+export class TaskListNotFoundError extends Error {
+  readonly path: string;
+}
+
 export interface TaskListCandidate {
   id: string;
   updatedAt: string;
   activeCount: number;
   completedCount: number;
   firstTaskName?: string;
+}
+
+export interface TaskListDiscovery {
+  candidates: TaskListCandidate[];
+  errors: string[];
 }
 
 export interface StoreOptions {
@@ -118,8 +127,10 @@ export interface StoreOptions {
 export class TaskStore {
   constructor(repositoryRoot: string, options?: StoreOptions);
   create(originSessionId: string): Promise<TaskListDocument>;
+  createWithMutation(originSessionId: string, operation: MutationOperation, nextId?: IdFactory): Promise<MutationResult>;
   read(id: string): Promise<TaskListDocument>;
   discover(): Promise<TaskListCandidate[]>;
+  discoverAvailable(): Promise<TaskListDiscovery>;
   mutate(id: string, operation: MutationOperation, nextId?: IdFactory): Promise<MutationResult>;
   get fileRoot(): string;
 }
@@ -175,6 +186,11 @@ Create `package.json` with a Git-installable Pi manifest and strict validation s
   "pi": {
     "extensions": ["./extensions/task-stack/index.ts"]
   },
+  "files": [
+    "extensions/",
+    "src/",
+    "README.md"
+  ],
   "scripts": {
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
@@ -207,6 +223,8 @@ Create `tsconfig.json`:
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
     "noEmit": true,
     "types": ["node"]
   },
@@ -550,11 +568,11 @@ Implement explicit runtime validation for every persisted field. Throw errors th
 For `<id>.json`, use `<id>.lock` as an atomic lock directory:
 
 1. Call `mkdir(lockPath)` without `recursive`.
-2. On success, write `owner.json` with process ID and acquisition time.
-3. On `EEXIST`, inspect lock age.
-4. Remove a lock only when its age exceeds `staleLockMs`.
+2. On success, create a token-specific owner-initialization marker, then write `owner.json` with the same token, process ID, and acquisition time. If this write fails, remove the new lock before returning the error.
+3. On `EEXIST`, inspect lock age, owner metadata, and owner-initialization markers. A live marker prevents reclaim while owner metadata is being written.
+4. Remove an old lock only when its recorded local owner process is no longer alive or valid owner metadata remains absent after the initialization grace period.
 5. Retry until `lockTimeoutMs`, then throw a timeout error.
-6. Always remove the owned lock in `finally`.
+6. In `finally` and initialization-error cleanup, treat completed `owner.json` metadata as authoritative. Remove the lock when its token matches. Only when `owner.json` is absent may the exact token-specific initialization marker authorize removal.
 
 Write JSON to `<id>.<process.pid>.<randomUUID()>.tmp` in the same directory. Flush and close the file handle, rename it over `<id>.json`, then remove any remaining temporary file in `finally`.
 
@@ -563,8 +581,10 @@ Use defaults of 2,000 ms lock timeout, 30,000 ms stale age, and 20 ms retry dela
 - [ ] **Step 5: Implement create, read, discover, and mutate**
 
 - `create` generates `crypto.randomUUID()`, creates an empty document, and writes while holding its list lock.
+- `createWithMutation` validates and applies the first operation before the new list is written, so a failed first add cannot leave an empty list file.
 - `read` validates the identifier and parsed document.
 - `discover` reads only `*.json`, ignores temporary and lock paths, returns metadata sorted by `updatedAt` descending, and throws an aggregate discovery error naming malformed files.
+- `discoverAvailable` performs the same scan but returns valid candidates plus unreadable-file diagnostics. The explicit resume flow uses it so one malformed or disappearing file does not block other candidates.
 - `mutate` acquires the lock, reads the latest document, calls `applyMutation`, writes the result atomically, and returns the mutation result.
 - Wrap the complete read-modify-write window with Pi's `withFileMutationQueue` for the resolved JSON path.
 
@@ -844,9 +864,9 @@ Append an attachment custom entry only after successful create or resume. Use a 
 
 - [ ] **Step 5: Implement tool execution**
 
-- `resume` without `taskListId`: call `discover` and return metadata only. Do not attach or mount.
+- `resume` without `taskListId`: call `discoverAvailable`, warn when unreadable files were skipped, and return valid candidate metadata only. Do not attach or mount.
 - `resume` with `taskListId`: read, append attachment, update runtime state, refresh widget, and return the active list.
-- `add` while unattached: create a list, append attachment, then apply add.
+- `add` while unattached: call `createWithMutation` so validation and the first add complete before persistence, then append the attachment marker.
 - Other mutation while unattached: throw `No task list is attached. Add a task to start a new list or ask to resume previous tasks.`
 - Mutations: call `store.mutate`, replace runtime document, refresh widget, and return `formatPlainList` plus mutation details.
 - `list`: require attachment and return active or full plain text without writing.
