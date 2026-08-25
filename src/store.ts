@@ -33,6 +33,11 @@ export interface TaskListCandidate {
   firstTaskName?: string;
 }
 
+export interface TaskListDiscovery {
+  candidates: TaskListCandidate[];
+  errors: string[];
+}
+
 export interface StoreOptions {
   lockTimeoutMs?: number;
   staleLockMs?: number;
@@ -208,43 +213,19 @@ export class TaskStore {
   }
 
   async discover(): Promise<TaskListCandidate[]> {
-    await mkdir(this.fileRoot, { recursive: true });
-    const entries = await readdir(this.fileRoot, { withFileTypes: true });
-    const documents: TaskListDocument[] = [];
-    const errors: Error[] = [];
-
-    await Promise.all(
-      entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-        .map(async (entry) => {
-          const id = entry.name.slice(0, -5);
-          try {
-            assertTaskListId(id);
-            const document = await readDocument(join(this.fileRoot, entry.name), id);
-            documents.push(document);
-          } catch (error) {
-            errors.push(error instanceof Error ? error : new Error(String(error)));
-          }
-        }),
-    );
-
+    const { documents, errors } = await this.scanDocuments();
     if (errors.length > 0) {
       throw new AggregateError(errors, `Could not discover task lists in ${this.fileRoot}`);
     }
+    return this.toCandidates(documents);
+  }
 
-    return documents
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .map((document) => {
-        const candidate: TaskListCandidate = {
-          id: document.id,
-          updatedAt: document.updatedAt,
-          activeCount: document.active.length,
-          completedCount: document.completed.length,
-        };
-        const firstTaskName = document.active[0]?.name ?? document.completed[0]?.name;
-        if (firstTaskName !== undefined) candidate.firstTaskName = firstTaskName;
-        return candidate;
-      });
+  async discoverAvailable(): Promise<TaskListDiscovery> {
+    const { documents, errors } = await this.scanDocuments();
+    return {
+      candidates: this.toCandidates(documents),
+      errors: errors.map((error) => error.message),
+    };
   }
 
   async mutate(
@@ -266,6 +247,43 @@ export class TaskStore {
   private filePath(id: string): string {
     assertTaskListId(id);
     return join(this.fileRoot, `${id}.json`);
+  }
+
+  private async scanDocuments(): Promise<{ documents: TaskListDocument[]; errors: Error[] }> {
+    await mkdir(this.fileRoot, { recursive: true });
+    const entries = await readdir(this.fileRoot, { withFileTypes: true });
+    const documents: TaskListDocument[] = [];
+    const errors: Error[] = [];
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+        .map(async (entry) => {
+          const id = entry.name.slice(0, -5);
+          try {
+            assertTaskListId(id);
+            documents.push(await readDocument(join(this.fileRoot, entry.name), id));
+          } catch (error) {
+            errors.push(error instanceof Error ? error : new Error(String(error)));
+          }
+        }),
+    );
+    return { documents, errors };
+  }
+
+  private toCandidates(documents: TaskListDocument[]): TaskListCandidate[] {
+    return documents
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map((document) => {
+        const candidate: TaskListCandidate = {
+          id: document.id,
+          updatedAt: document.updatedAt,
+          activeCount: document.active.length,
+          completedCount: document.completed.length,
+        };
+        const firstTaskName = document.active[0]?.name ?? document.completed[0]?.name;
+        if (firstTaskName !== undefined) candidate.firstTaskName = firstTaskName;
+        return candidate;
+      });
   }
 
   private async withLock<T>(id: string, operation: () => Promise<T>): Promise<T> {

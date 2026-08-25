@@ -49,12 +49,19 @@ function renderTaskTree(task: Task, index: number, width: number, theme: RenderT
   ];
 }
 
+const MAX_WIDGET_LINES = 10;
+
 export function renderWidgetLines(document: TaskListDocument, width: number, theme: RenderTheme): string[] {
   if (document.active.length === 0) return [];
-  return [
+  const lines = [
     truncateToWidth(theme.accent("Tasks"), Math.max(0, width)),
     ...document.active.flatMap((task, index) => renderTaskTree(task, index, width, theme)),
   ];
+  if (lines.length <= MAX_WIDGET_LINES) return lines;
+  const visible = lines.slice(0, MAX_WIDGET_LINES - 1);
+  const omitted = lines.length - visible.length;
+  visible.push(truncateToWidth(theme.dim(`… ${omitted} more. Use /task-stack to view all tasks.`), Math.max(0, width)));
+  return visible;
 }
 
 export function renderFullListLines(document: TaskListDocument, width: number, theme: RenderTheme): string[] {

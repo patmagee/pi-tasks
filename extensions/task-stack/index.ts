@@ -120,7 +120,10 @@ function mutationFromParams(params: ToolParams): MutationOperation {
       };
       if (params.name !== undefined) operation.name = params.name;
       if (params.status !== undefined) operation.status = params.status;
-      if (params.assignee !== undefined) operation.assignee = params.assignee.trim().length === 0 ? null : params.assignee;
+      if (params.assignee !== undefined) {
+        const assignee = params.assignee.trim();
+        operation.assignee = assignee.length === 0 ? null : assignee;
+      }
       if (operation.name === undefined && operation.status === undefined && operation.assignee === undefined) {
         throw new Error("update requires name, status, or assignee");
       }
@@ -191,6 +194,7 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
         document = await store.read(attachmentId);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        appendAttachment(null);
         attachmentId = undefined;
         ctx.ui.notify(`Could not restore task stack: ${message}`, "error");
       }
@@ -247,6 +251,7 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
       "Call task_stack with action resume only when the user asks to resume previous tasks.",
     ],
     parameters: TaskStackParams,
+    executionMode: "sequential",
 
     async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
       const params = rawParams as ToolParams;
@@ -254,10 +259,16 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
 
       if (params.action === "resume") {
         if (params.taskListId === undefined) {
-          const candidates = await store.discover();
+          const discovery = await store.discoverAvailable();
+          if (discovery.errors.length > 0) {
+            ctx.ui.notify(
+              `Skipped ${discovery.errors.length} unreadable task-list file(s) during resume discovery.`,
+              "warning",
+            );
+          }
           return {
-            content: [{ type: "text", text: formatCandidates(candidates) }],
-            details: { action: "resume", candidates },
+            content: [{ type: "text", text: formatCandidates(discovery.candidates) }],
+            details: { action: "resume", candidates: discovery.candidates, errors: discovery.errors },
           };
         }
         const resumed = await store.read(params.taskListId);

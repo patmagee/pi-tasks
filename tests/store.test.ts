@@ -159,7 +159,7 @@ test("read rejects mismatched identifiers and invalid section state", async (t) 
 test("discover reports malformed candidate files without returning partial results", async (t) => {
   const root = await temporaryRoot(t);
   const store = new TaskStore(root);
-  await store.create("session-a");
+  const valid = await store.create("session-a");
   const malformedId = "00000000-0000-4000-8000-000000000021";
   await writeFile(join(store.fileRoot, `${malformedId}.json`), "not-json", "utf8");
 
@@ -169,6 +169,11 @@ test("discover reports malformed candidate files without returning partial resul
     assert.match(String(error.errors[0]), new RegExp(malformedId));
     return true;
   });
+
+  const available = await store.discoverAvailable();
+  assert.deepEqual(available.candidates.map((candidate) => candidate.id), [valid.id]);
+  assert.equal(available.errors.length, 1);
+  assert.match(available.errors[0] ?? "", new RegExp(malformedId));
 });
 
 test("lock timeout leaves the current document unchanged", async (t) => {

@@ -77,6 +77,19 @@ test("widget returns no lines when no active parents exist", () => {
   assert.deepEqual(renderWidgetLines(completedOnlyFixture(), 80, identityTheme), []);
 });
 
+test("widget caps long lists at ten lines with an overflow hint", () => {
+  const document = renderFixture();
+  document.active = Array.from({ length: 12 }, (_, index) => ({
+    id: `task-${index}`,
+    name: `Task ${index + 1}`,
+    status: "pending" as const,
+    subtasks: [],
+  }));
+  const lines = renderWidgetLines(document, 80, identityTheme);
+  assert.equal(lines.length, 10);
+  assert.equal(lines.at(-1), "… 4 more. Use /task-stack to view all tasks.");
+});
+
 test("full list separates active and completed parent trees", () => {
   const lines = renderFullListLines(renderFixture(), 120, identityTheme);
   assert.deepEqual(lines, [
