@@ -30,7 +30,7 @@ function renderItem(
       label = theme.muted(theme.strikethrough(`${reference} ${item.name}`));
       break;
     case "pending":
-      glyph = theme.dim("○");
+      glyph = theme.text("○");
       label = theme.text(`${reference} ${item.name}`);
       break;
   }

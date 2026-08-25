@@ -90,6 +90,11 @@ test("full list separates active and completed parent trees", () => {
     "✓ 1 Old completed parent",
     "  ✓ 1.1 Old child",
   ]);
+  assert.deepEqual(renderFullListLines(completedOnlyFixture(), 80, identityTheme), [
+    "Completed",
+    "✓ 1 Old completed parent",
+    "  ✓ 1.1 Old child",
+  ]);
 });
 
 test("every rendered line fits the available width", () => {
@@ -113,14 +118,17 @@ test("rendering selects semantic styles for each state", () => {
   const output = renderWidgetLines(renderFixture(), 200, theme).join("\n");
   assert.match(output, /<accent>▶<\/accent> <accent>1 Implement persistence<\/accent>/);
   assert.match(output, /<success>✓<\/success> <muted><strike>1\.1 Add atomic writes<\/strike><\/muted>/);
-  assert.match(output, /<dim>○<\/dim> <text>2 Add task widget<\/text>/);
+  assert.match(output, /<text>○<\/text> <text>2 Add task widget<\/text>/);
   assert.match(output, /<muted>@store-agent<\/muted>/);
 });
 
-test("agent summary excludes completed parent history", () => {
-  const summary = renderAgentSummary(renderFixture());
+test("agent summary excludes completed parent history and includes subtask assignees", () => {
+  const document = renderFixture();
+  document.active[0]!.subtasks[1]!.assignee = "lock-agent";
+  const summary = renderAgentSummary(document);
   assert.match(summary, /1 \[in_progress\] Implement persistence @store-agent/);
   assert.match(summary, /1\.1 \[completed\] Add atomic writes/);
+  assert.match(summary, /1\.2 \[pending\] Add lock timeout @lock-agent/);
   assert.doesNotMatch(summary, /Old completed parent/);
   assert.equal(renderAgentSummary(completedOnlyFixture()), "");
 });
