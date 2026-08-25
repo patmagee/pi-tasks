@@ -137,12 +137,27 @@ test("pop archives only the first active parent", () => {
   assert.equal(document.active[0]?.name, "Second");
 });
 
+test("pop archives a parent after all of its subtasks complete", () => {
+  let document = readyParentFollowedByTask();
+  document = applyMutation(document, { action: "pop" }, now, ids()).document;
+  assert.equal(document.completed[0]?.name, "Parent");
+  assert.deepEqual(document.completed[0]?.subtasks.map((task) => task.status), ["completed", "completed"]);
+  assert.equal(document.active[0]?.name, "Next");
+});
+
 test("delete removes parents and subtasks from either section", () => {
   let document = activeAndCompletedDocument();
   document = applyMutation(document, { action: "delete", task: "1.1" }, now, ids()).document;
   document = applyMutation(document, { action: "delete", task: "1", section: "completed" }, now, ids()).document;
   assert.equal(document.active[0]?.subtasks.length, 0);
   assert.equal(document.completed.length, 0);
+});
+
+test("delete removes a subtask from completed history", () => {
+  let document = readyParentFollowedByTask();
+  document = applyMutation(document, { action: "update", task: "1", status: "completed" }, now, ids()).document;
+  document = applyMutation(document, { action: "delete", task: "1.1", section: "completed" }, now, ids()).document;
+  assert.deepEqual(document.completed[0]?.subtasks.map((task) => task.name), ["Two"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -171,6 +186,16 @@ test("update with null assignee removes an existing assignee", () => {
   document = applyMutation(document, { action: "update", task: "1", assignee: "alice" }, now, ids()).document;
   document = applyMutation(document, { action: "update", task: "1", assignee: null }, now, ids()).document;
   assert.equal("assignee" in document.active[0]!, false);
+});
+
+test("update rejects a blank replacement name", () => {
+  let document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
+  document = applyMutation(document, { action: "add", name: "Work" }, now, ids("w")).document;
+  assert.throws(
+    () => applyMutation(document, { action: "update", task: "1", name: "   " }, now, ids()),
+    /name/i,
+  );
+  assert.equal(document.active[0]?.name, "Work");
 });
 
 test("adding a subtask to a subtask reference throws", () => {
@@ -243,8 +268,22 @@ test("formatPlainList uses distinct glyphs and renders the completed section", (
 });
 
 test("invalid names references and positions do not mutate the source", () => {
-  const source = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
+  let source = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
   assert.throws(() => applyMutation(source, { action: "add", name: "   " }, now, ids("x")), /name/i);
+  source = applyMutation(source, { action: "add", name: "Existing" }, now, ids("existing")).document;
+  assert.throws(() => applyMutation(source, { action: "add", name: "Zero", position: 0 }, now, ids("zero")), /position/i);
+  assert.throws(() => applyMutation(source, { action: "add", name: "Too far", position: 3 }, now, ids("far")), /position/i);
   assert.throws(() => applyMutation(source, { action: "move", task: "2", position: 1 }, now, ids()), /not found/i);
-  assert.deepEqual(source.active, []);
+  assert.deepEqual(source.active.map((task) => task.name), ["Existing"]);
+});
+
+test("references must match exactly N or N.M", () => {
+  const source = documentWithParentAndSubtasks();
+  for (const task of ["1x", "1.2.3", "01", "1.02"]) {
+    assert.throws(
+      () => applyMutation(source, { action: "delete", task }, now, ids()),
+      /invalid reference/i,
+    );
+  }
+  assert.deepEqual(source.active[0]?.subtasks.map((task) => task.name), ["One", "Two"]);
 });

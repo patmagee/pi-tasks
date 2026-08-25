@@ -14,7 +14,12 @@ import {
   renderWidgetLines,
   type RenderTheme,
 } from "../../src/render.ts";
-import { resolveRepositoryRoot, TaskStore, type TaskListCandidate } from "../../src/store.ts";
+import {
+  resolveRepositoryRoot,
+  TaskListNotFoundError,
+  TaskStore,
+  type TaskListCandidate,
+} from "../../src/store.ts";
 
 const ATTACHMENT_TYPE = "pi-task-stack-attachment";
 const WIDGET_ID = "task-stack";
@@ -194,8 +199,10 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
         document = await store.read(attachmentId);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        appendAttachment(null);
-        attachmentId = undefined;
+        if (error instanceof TaskListNotFoundError) {
+          appendAttachment(null);
+          attachmentId = undefined;
+        }
         ctx.ui.notify(`Could not restore task stack: ${message}`, "error");
       }
     }
@@ -210,10 +217,12 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      appendAttachment(null);
-      attachmentId = undefined;
-      document = undefined;
-      refreshWidget(ctx);
+      if (error instanceof TaskListNotFoundError) {
+        appendAttachment(null);
+        attachmentId = undefined;
+        document = undefined;
+        refreshWidget(ctx);
+      }
       ctx.ui.notify(`Could not refresh task stack: ${message}`, "error");
       return false;
     }
@@ -235,7 +244,7 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
-    await refreshFromStore(ctx);
+    if (!await refreshFromStore(ctx)) return undefined;
     const systemPrompt = buildTurnSystemPrompt(event.systemPrompt, attachmentId, document);
     return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
   });
@@ -272,8 +281,10 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
           };
         }
         const resumed = await store.read(params.taskListId);
-        if (attachmentId !== undefined && attachmentId !== params.taskListId) appendAttachment(null);
-        appendAttachment(params.taskListId);
+        if (attachmentId !== params.taskListId) {
+          if (attachmentId !== undefined) appendAttachment(null);
+          appendAttachment(params.taskListId);
+        }
         attachmentId = params.taskListId;
         document = resumed;
         refreshWidget(ctx);

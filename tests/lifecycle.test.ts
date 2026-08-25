@@ -187,6 +187,42 @@ test("missing attached file clears the widget and notifies before an agent turn"
   assert.match(harness.notifications.at(-1)?.message ?? "", /could not refresh task stack/i);
 });
 
+test("transient refresh errors keep the attachment and last valid widget", async (t) => {
+  const root = await temporaryRoot(t);
+  const harness = createHarness(root);
+  await harness.fire("session_start", { reason: "startup" });
+  const added = await harness.tool.execute("call-add", { action: "add", name: "Keep visible" }, undefined, undefined, harness.ctx);
+  await writeFile(
+    join(root, ".pi", "tasks", `${added.details.taskListId}.json`),
+    JSON.stringify({ version: 2, id: added.details.taskListId }),
+    "utf8",
+  );
+
+  await harness.fire("before_agent_start", { systemPrompt: "base" });
+  assert.equal(findLatestAttachment(harness.entries), added.details.taskListId);
+  assert.equal(harness.entries.length, 1);
+  assert.equal(typeof harness.widget, "function");
+  assert.match(harness.notifications.at(-1)?.message ?? "", /could not refresh task stack/i);
+});
+
+test("invalid file during session restore does not write a detach marker", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new TaskStore(root);
+  const document = await store.create("old-session");
+  await writeFile(
+    join(store.fileRoot, `${document.id}.json`),
+    JSON.stringify({ version: 2, id: document.id }),
+    "utf8",
+  );
+  const harness = createHarness(root, [attachmentEntry(document.id)]);
+
+  await harness.fire("session_start", { reason: "resume" });
+  assert.equal(findLatestAttachment(harness.entries), document.id);
+  assert.equal(harness.entries.length, 1);
+  assert.equal(harness.widget, undefined);
+  assert.match(harness.notifications.at(-1)?.message ?? "", /could not restore task stack/i);
+});
+
 test("new session discovers without attaching and resumes only the selected list", async (t) => {
   const root = await temporaryRoot(t);
   const store = new TaskStore(root);
@@ -250,6 +286,23 @@ test("tool mutations use fresh visible positions and trim assignees", async (t) 
   );
   assert.equal("assignee" in deleted.details.document.active[0], false);
   assert.equal(deleted.details.document.completed.length, 0);
+});
+
+test("resuming the current list does not append a duplicate marker", async (t) => {
+  const root = await temporaryRoot(t);
+  const harness = createHarness(root);
+  await harness.fire("session_start", { reason: "startup" });
+  const added = await harness.tool.execute("add", { action: "add", name: "Current list" }, undefined, undefined, harness.ctx);
+
+  await harness.tool.execute(
+    "resume",
+    { action: "resume", taskListId: added.details.taskListId },
+    undefined,
+    undefined,
+    harness.ctx,
+  );
+  assert.equal(harness.entries.length, 1);
+  assert.equal(findLatestAttachment(harness.entries), added.details.taskListId);
 });
 
 test("switching attached lists records detach then attach", async (t) => {

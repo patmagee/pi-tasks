@@ -1,3 +1,4 @@
 .worktrees/
+.pi/tasks/
 node_modules/
 *.tgz

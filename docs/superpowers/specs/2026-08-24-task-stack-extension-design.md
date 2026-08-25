@@ -232,11 +232,11 @@ Lifecycle behavior:
 
 Each task-list file has an adjacent lock directory. Mutation acquires the lock with an atomic directory creation, reads the latest file, applies one operation, writes a temporary file in the same directory, and atomically renames it over the target.
 
-A bounded lock timeout prevents indefinite waiting. Lock metadata records creation time and process information for diagnostics. A stale-lock policy can recover locks older than the documented threshold because task mutations are short operations.
+A bounded lock timeout prevents indefinite waiting. Lock metadata records an ownership token, creation time, and process identifier. A lock older than the documented threshold can be reclaimed only when its recorded local owner process is no longer alive or valid owner metadata is absent. Release removes a lock only when its ownership token still matches.
 
 Within one Pi process, mutations also use Pi's file mutation queue for the resolved task-list path. This preserves call order and coordinates with any built-in file tool that targets the same file.
 
-Discovery and list operations do not write. They tolerate a file disappearing during discovery and report malformed candidate files without exposing tasks from them.
+Discovery and list operations do not write. The strict store API reports unreadable candidate files as one aggregate error. Explicit resume uses tolerant discovery, which retains valid candidate metadata, reports unreadable files without exposing their task contents, and tolerates a file disappearing during the scan.
 
 ## Agent context after compaction
 

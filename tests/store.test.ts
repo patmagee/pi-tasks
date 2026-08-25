@@ -37,7 +37,7 @@ function startMutator(root: string, id: string, name: string, readyRoot: string,
     while (true) {
       try { await access(GO_PATH); break; } catch { await new Promise((resolve) => setTimeout(resolve, 2)); }
     }
-    await new TaskStore(ROOT, { staleLockMs: 1_000, lockTimeoutMs: 2_000, retryDelayMs: 2 })
+    await new TaskStore(ROOT, { staleLockMs: 0, lockTimeoutMs: 2_000, retryDelayMs: 2 })
       .mutate(ID, { action: "add", name: NAME });
   `;
   return spawn(process.execPath, ["--input-type=module", "--eval", script], {
@@ -154,6 +154,23 @@ test("read rejects mismatched identifiers and invalid section state", async (t) 
     "utf8",
   );
   await assert.rejects(store.read(invalidId), /active.*cannot be completed/i);
+
+  const nestedId = "00000000-0000-4000-8000-000000000034";
+  await writeFile(
+    join(store.fileRoot, `${nestedId}.json`),
+    JSON.stringify({
+      ...document,
+      id: nestedId,
+      active: [{
+        id: "task-a",
+        name: "Parent",
+        status: "pending",
+        subtasks: [{ id: "sub-a", name: "Nested", status: "pending", subtasks: [] }],
+      }],
+    }),
+    "utf8",
+  );
+  await assert.rejects(store.read(nestedId), /subtask.*subtasks.*not supported/i);
 });
 
 test("discover reports malformed candidate files without returning partial results", async (t) => {
@@ -193,10 +210,38 @@ test("a stale lock is recovered before mutation", async (t) => {
   const root = await temporaryRoot(t);
   const store = new TaskStore(root, { lockTimeoutMs: 100, retryDelayMs: 5, staleLockMs: 0 });
   const document = await store.create("session-a");
-  await mkdir(join(store.fileRoot, `${document.id}.lock`));
+  const lockPath = join(store.fileRoot, `${document.id}.lock`);
+  await mkdir(lockPath);
+  const old = new Date(Date.now() - 5_000);
+  await utimes(lockPath, old, old);
 
   const result = await store.mutate(document.id, { action: "add", name: "Recovered" }, () => "task-a");
   assert.equal(result.document.active[0]?.name, "Recovered");
+});
+
+test("a live process lock is never reclaimed only because of age", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new TaskStore(root, { lockTimeoutMs: 30, retryDelayMs: 5, staleLockMs: 0 });
+  const document = await store.create("session-a");
+  const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"]);
+  t.after(() => child.kill());
+  assert.notEqual(child.pid, undefined);
+
+  const lockPath = join(store.fileRoot, `${document.id}.lock`);
+  await mkdir(lockPath);
+  await writeFile(
+    join(lockPath, "owner.json"),
+    JSON.stringify({ token: "live-owner", pid: child.pid, acquiredAt: new Date(0).toISOString() }),
+    "utf8",
+  );
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+
+  await assert.rejects(
+    store.mutate(document.id, { action: "add", name: "Must wait" }),
+    /timed out.*lock/i,
+  );
+  assert.equal((await store.read(document.id)).active.length, 0);
 });
 
 test("a leaked reclaim gate still reaches the lock timeout", async (t) => {

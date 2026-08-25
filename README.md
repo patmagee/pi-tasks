@@ -103,6 +103,6 @@ If an attached file is missing or invalid, the extension detaches it, removes th
 
 ## Concurrent access
 
-Writes use an in-process mutation queue, a cross-process lock, and atomic file replacement. The default lock wait timeout is 2 seconds. A lock is stale after 30 seconds and can then be reclaimed safely.
+Writes use an in-process mutation queue, a cross-process lock, and atomic file replacement. The default lock wait timeout is 2 seconds. A lock becomes eligible for stale recovery after 30 seconds, but it is not reclaimed while its recorded local owner process is alive.
 
 Two sessions can intentionally attach the same list. Their writes are serialized, but visible task positions can change after another write. Read the latest list before a position-dependent change.

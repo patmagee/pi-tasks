@@ -24,6 +24,17 @@ import {
 
 const TASK_LIST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const STATUSES = new Set<TaskStatus>(["pending", "in_progress", "completed"]);
+const OWNER_INITIALIZATION_GRACE_MS = 1_000;
+
+export class TaskListNotFoundError extends Error {
+  readonly path: string;
+
+  constructor(path: string) {
+    super(`Task list not found: ${path}`);
+    this.name = "TaskListNotFoundError";
+    this.path = path;
+  }
+}
 
 export interface TaskListCandidate {
   id: string;
@@ -50,6 +61,12 @@ interface RequiredStoreOptions {
   staleLockMs: number;
   retryDelayMs: number;
   now: () => Date;
+}
+
+interface LockOwner {
+  token: string;
+  pid: number;
+  acquiredAt: string;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
@@ -85,6 +102,9 @@ function parseStatus(value: unknown, field: string, path: string): TaskStatus {
 
 function parseSubtask(value: unknown, field: string, path: string): Subtask {
   const record = requireRecord(value, field, path);
+  if ("subtasks" in record) {
+    throw new Error(`${path}: ${field}.subtasks is not supported`);
+  }
   const subtask: Subtask = {
     id: requireString(record.id, `${field}.id`, path),
     name: requireString(record.name, `${field}.name`, path),
@@ -149,7 +169,7 @@ async function readDocument(path: string, expectedId?: string): Promise<TaskList
     raw = await readFile(path, "utf8");
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
-      throw new Error(`Task list not found: ${path}`);
+      throw new TaskListNotFoundError(path);
     }
     throw error;
   }
@@ -289,16 +309,22 @@ export class TaskStore {
   private async withLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
     await mkdir(this.fileRoot, { recursive: true });
     const lockPath = join(this.fileRoot, `${id}.lock`);
+    const token = randomUUID();
     const startedAt = Date.now();
     let ownsLock = false;
 
     while (!ownsLock) {
       try {
         await mkdir(lockPath);
-        ownsLock = true;
-        await this.writeOwner(lockPath);
+        try {
+          await this.writeOwner(lockPath, token);
+          ownsLock = true;
+        } catch (error) {
+          await rm(lockPath, { recursive: true, force: true });
+          throw error;
+        }
       } catch (error) {
-        if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+        if (!isNodeError(error) || (error.code !== "EEXIST" && error.code !== "ENOTEMPTY")) throw error;
         if (await this.isStale(lockPath)) {
           await this.reclaimStaleLock(lockPath);
           if (Date.now() - startedAt >= this.options.lockTimeoutMs) {
@@ -317,14 +343,18 @@ export class TaskStore {
     try {
       return await operation();
     } finally {
-      if (ownsLock) await rm(lockPath, { recursive: true, force: true });
+      if (ownsLock) await this.releaseOwnedLock(lockPath, token);
     }
   }
 
   private async isStale(lockPath: string): Promise<boolean> {
     try {
       const lockStat = await stat(lockPath);
-      return Date.now() - lockStat.mtimeMs >= this.options.staleLockMs;
+      const age = Date.now() - lockStat.mtimeMs;
+      if (age < this.options.staleLockMs) return false;
+      const owner = await this.readOwner(lockPath);
+      if (owner === undefined) return age >= Math.max(this.options.staleLockMs, OWNER_INITIALIZATION_GRACE_MS);
+      return !this.isProcessAlive(owner.pid);
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") return false;
       throw error;
@@ -349,11 +379,42 @@ export class TaskStore {
     }
   }
 
-  private async writeOwner(lockPath: string): Promise<void> {
+  private async releaseOwnedLock(lockPath: string, token: string): Promise<void> {
+    const owner = await this.readOwner(lockPath);
+    if (owner?.token === token) await rm(lockPath, { recursive: true, force: true });
+  }
+
+  private async readOwner(lockPath: string): Promise<LockOwner | undefined> {
+    try {
+      const value = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")) as unknown;
+      if (typeof value !== "object" || value === null) return undefined;
+      const record = value as Record<string, unknown>;
+      if (typeof record.token !== "string" || !Number.isInteger(record.pid) || typeof record.acquiredAt !== "string") {
+        return undefined;
+      }
+      return { token: record.token, pid: record.pid as number, acquiredAt: record.acquiredAt };
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return undefined;
+      if (error instanceof SyntaxError) return undefined;
+      throw error;
+    }
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return !isNodeError(error) || error.code !== "ESRCH";
+    }
+  }
+
+  private async writeOwner(lockPath: string, token: string): Promise<void> {
     const ownerPath = join(lockPath, "owner.json");
     const handle = await open(ownerPath, "wx");
     try {
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })}\n`, "utf8");
+      const owner: LockOwner = { token, pid: process.pid, acquiredAt: new Date().toISOString() };
+      await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
       await handle.sync();
     } finally {
       await handle.close();

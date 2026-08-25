@@ -20,11 +20,7 @@ export interface Subtask {
   assignee?: string;
 }
 
-export interface Task {
-  id: string;
-  name: string;
-  status: TaskStatus;
-  assignee?: string;
+export interface Task extends Subtask {
   subtasks: Subtask[];
 }
 
@@ -80,12 +76,14 @@ export interface PopMutation {
   action: "pop";
 }
 
+export type TaskSection = "active" | "completed";
+
 export interface DeleteMutation {
   action: "delete";
   /** Reference string: "N" or "N.M". */
   task: string;
   /** Resolve the reference against the completed list. Defaults to active. */
-  section?: "completed";
+  section?: TaskSection;
 }
 
 export type MutationOperation = AddMutation | MoveMutation | UpdateMutation | PopMutation | DeleteMutation;
@@ -134,26 +132,28 @@ function requireName(value: string): string {
  * "N.M" → { parentIndex: N-1, subtaskIndex: M-1 }
  */
 function parseReference(value: string): { parentIndex: number; subtaskIndex?: number } {
-  const dotIndex = value.indexOf(".");
-  if (dotIndex === -1) {
-    const n = parseInt(value, 10);
-    if (isNaN(n) || n < 1) throw new Error(`Invalid reference: ${value}`);
-    return { parentIndex: n - 1 };
+  const match = /^([1-9]\d*)(?:\.([1-9]\d*))?$/.exec(value);
+  if (match === null) throw new Error(`Invalid reference: ${value}`);
+  const parent = Number(match[1]);
+  const subtask = match[2] === undefined ? undefined : Number(match[2]);
+  if (!Number.isSafeInteger(parent) || (subtask !== undefined && !Number.isSafeInteger(subtask))) {
+    throw new Error(`Invalid reference: ${value}`);
   }
-  const n = parseInt(value.slice(0, dotIndex), 10);
-  const m = parseInt(value.slice(dotIndex + 1), 10);
-  if (isNaN(n) || n < 1 || isNaN(m) || m < 1) throw new Error(`Invalid reference: ${value}`);
-  return { parentIndex: n - 1, subtaskIndex: m - 1 };
+  return subtask === undefined
+    ? { parentIndex: parent - 1 }
+    : { parentIndex: parent - 1, subtaskIndex: subtask - 1 };
 }
 
 /**
  * Convert a one-based optional position into a zero-based insertion index.
- * Appends when position is undefined or exceeds the list length.
+ * Appends when position is undefined or exactly one after the current list.
  */
 function insertionIndex(position: number | undefined, length: number): number {
   if (position === undefined) return length;
-  const idx = position - 1;
-  return Math.max(0, Math.min(idx, length));
+  if (!Number.isInteger(position) || position < 1 || position > length + 1) {
+    throw new Error(`Invalid position: ${position}`);
+  }
+  return position - 1;
 }
 
 /**
@@ -161,8 +161,9 @@ function insertionIndex(position: number | undefined, length: number): number {
  * a move within a list of the given length (after the item has been removed).
  */
 function moveIndex(position: number, length: number): number {
+  if (!Number.isInteger(position) || position < 1) throw new Error(`Invalid position: ${position}`);
   const idx = position - 1;
-  return Math.max(0, Math.min(idx, length));
+  return Math.min(idx, length);
 }
 
 /**
