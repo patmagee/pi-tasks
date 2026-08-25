@@ -37,6 +37,7 @@ interface ToolParams {
   task?: string;
   status?: TaskStatus;
   assignee?: string;
+  parallel?: boolean;
   section?: "active" | "completed";
   includeCompleted?: boolean;
   taskListId?: string;
@@ -50,6 +51,9 @@ const TaskStackParams = Type.Object({
   task: Type.Optional(Type.String({ description: "Visible task reference such as 5 or 5.1" })),
   status: Type.Optional(StringEnum(["pending", "in_progress", "completed"] as const)),
   assignee: Type.Optional(Type.String({ description: "Free-form assignee label; an empty string clears it" })),
+  parallel: Type.Optional(Type.Boolean({
+    description: "Parent-only scheduling flag; set true only when the current user message explicitly authorizes parallel execution; authorization does not carry forward",
+  })),
   section: Type.Optional(StringEnum(["active", "completed"] as const)),
   includeCompleted: Type.Optional(Type.Boolean()),
   taskListId: Type.Optional(Type.String({ description: "Task-list UUID returned by resume discovery" })),
@@ -116,6 +120,7 @@ function mutationFromParams(params: ToolParams): MutationOperation {
       const operation: MutationOperation = { action: "add", name: requireString(params.name, "name") };
       if (params.position !== undefined) operation.position = params.position;
       if (params.parent !== undefined) operation.parent = params.parent;
+      if (params.parallel !== undefined) operation.parallel = params.parallel;
       return operation;
     }
     case "update": {
@@ -129,8 +134,14 @@ function mutationFromParams(params: ToolParams): MutationOperation {
         const assignee = params.assignee.trim();
         operation.assignee = assignee.length === 0 ? null : assignee;
       }
-      if (operation.name === undefined && operation.status === undefined && operation.assignee === undefined) {
-        throw new Error("update requires name, status, or assignee");
+      if (params.parallel !== undefined) operation.parallel = params.parallel;
+      if (
+        operation.name === undefined
+        && operation.status === undefined
+        && operation.assignee === undefined
+        && operation.parallel === undefined
+      ) {
+        throw new Error("update requires name, status, assignee, or parallel");
       }
       return operation;
     }
@@ -264,6 +275,7 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
       "Use task_stack for the attached execution task list instead of an ad hoc checklist.",
       "Do not issue dependent task_stack mutations in one parallel tool batch because visible task numbers can change.",
       "Call task_stack with action resume only when the user asks to resume previous tasks.",
+      "Set parallel to true only when the current user message explicitly authorizes parallel execution; never infer permission, and authorization does not carry forward.",
     ],
     parameters: TaskStackParams,
     executionMode: "sequential",

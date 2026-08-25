@@ -173,6 +173,54 @@ test("read rejects mismatched identifiers and invalid section state", async (t) 
   await assert.rejects(store.read(nestedId), /subtask.*subtasks.*not supported/i);
 });
 
+test("store accepts parent parallel booleans and rejects parallel subtasks", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new TaskStore(root);
+  const document = await store.create("session-a");
+  const path = join(store.fileRoot, `${document.id}.json`);
+  const baseTask = { id: "task-a", name: "Work", status: "pending", subtasks: [] };
+
+  await writeFile(
+    path,
+    JSON.stringify({
+      ...document,
+      active: [
+        { ...baseTask, parallel: true },
+        { ...baseTask, id: "task-b", parallel: false },
+      ],
+    }),
+    "utf8",
+  );
+  const parsed = await store.read(document.id);
+  assert.equal(parsed.active[0]?.parallel, true);
+  assert.equal(parsed.active[1]?.parallel, false);
+
+  const canonicalized = await store.mutate(document.id, { action: "update", task: "2", name: "Renamed" });
+  assert.equal("parallel" in canonicalized.document.active[1]!, false);
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  assert.equal("parallel" in persisted.active[1], false);
+
+  await writeFile(
+    path,
+    JSON.stringify({ ...document, active: [{ ...baseTask, parallel: "yes" }] }),
+    "utf8",
+  );
+  await assert.rejects(store.read(document.id), /parallel.*boolean/i);
+
+  await writeFile(
+    path,
+    JSON.stringify({
+      ...document,
+      active: [{
+        ...baseTask,
+        subtasks: [{ id: "sub-a", name: "Child", status: "pending", parallel: false }],
+      }],
+    }),
+    "utf8",
+  );
+  await assert.rejects(store.read(document.id), /subtask.*parallel.*not supported/i);
+});
+
 test("discover reports malformed candidate files without returning partial results", async (t) => {
   const root = await temporaryRoot(t);
   const store = new TaskStore(root);

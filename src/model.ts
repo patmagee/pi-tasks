@@ -21,6 +21,8 @@ export interface Subtask {
 }
 
 export interface Task extends Subtask {
+  /** True only when the user explicitly authorizes parallel execution. */
+  parallel?: boolean;
   subtasks: Subtask[];
 }
 
@@ -48,6 +50,8 @@ export interface AddMutation {
   position?: number;
   /** Reference string "N" for the parent task. Absent means top-level. */
   parent?: string;
+  /** Parent-only scheduling flag. True requires explicit user authorization. */
+  parallel?: boolean;
 }
 
 export interface MoveMutation {
@@ -70,6 +74,8 @@ export interface UpdateMutation {
   status?: "pending" | "in_progress" | "completed";
   /** Pass null to remove an existing assignee. */
   assignee?: string | null;
+  /** Parent-only scheduling flag. False restores the sequential default. */
+  parallel?: boolean;
 }
 
 export interface PopMutation {
@@ -107,7 +113,9 @@ export function createTaskList(id: string, originSessionId: string, now: string)
 // ---------------------------------------------------------------------------
 
 function cloneTask(t: Task): Task {
-  return { ...t, subtasks: t.subtasks.map((s) => ({ ...s })) };
+  const clone = { ...t, subtasks: t.subtasks.map((s) => ({ ...s })) };
+  if (clone.parallel !== true) delete clone.parallel;
+  return clone;
 }
 
 function cloneDocument(source: TaskListDocument): TaskListDocument {
@@ -260,6 +268,9 @@ function applyAdd(
   const name = requireName(mutation.name);
 
   if (mutation.parent !== undefined) {
+    if (mutation.parallel !== undefined) {
+      throw new Error("Parallel scheduling is supported only for parent tasks");
+    }
     // Subtask path — resolve parent and validate it is a top-level task.
     const ref = parseReference(mutation.parent);
     if (ref.subtaskIndex !== undefined) {
@@ -284,6 +295,7 @@ function applyAdd(
   doc.updatedAt = now;
   const idx = insertionIndex(mutation.position, doc.active.length);
   const task: Task = { id: nextId(), name, status: "pending", subtasks: [] };
+  if (mutation.parallel === true) task.parallel = true;
   doc.active.splice(idx, 0, task);
   return { document: doc, message: `Added task "${name}"` };
 }
@@ -335,12 +347,18 @@ function applyUpdate(source: TaskListDocument, mutation: UpdateMutation, now: st
   const targetParent = doc.active[parentIndex]!;
 
   if (subtaskIndex !== undefined) {
+    if (mutation.parallel !== undefined) {
+      throw new Error("Parallel scheduling is supported only for parent tasks");
+    }
     const sub = targetParent.subtasks[subtaskIndex]!;
     if (mutation.name !== undefined) sub.name = requireName(mutation.name);
     if (mutation.status !== undefined) sub.status = mutation.status;
     applyAssignee(sub, mutation.assignee);
     return { document: doc, message: `Updated subtask "${sub.name}"` };
   }
+
+  if (mutation.parallel === true) targetParent.parallel = true;
+  if (mutation.parallel === false) delete targetParent.parallel;
 
   // Completing a parent validates subtasks and archives it.
   if (mutation.status === "completed") {

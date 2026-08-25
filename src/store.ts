@@ -110,6 +110,9 @@ function parseSubtask(value: unknown, field: string, path: string): Subtask {
   if ("subtasks" in record) {
     throw new Error(`${path}: ${field}.subtasks is not supported`);
   }
+  if ("parallel" in record) {
+    throw new Error(`${path}: ${field}.parallel is not supported for a subtask`);
+  }
   const subtask: Subtask = {
     id: requireString(record.id, `${field}.id`, path),
     name: requireString(record.name, `${field}.name`, path),
@@ -134,6 +137,12 @@ function parseTask(value: unknown, field: string, path: string): Task {
   };
   if (record.assignee !== undefined) {
     task.assignee = requireString(record.assignee, `${field}.assignee`, path);
+  }
+  if (record.parallel !== undefined) {
+    if (typeof record.parallel !== "boolean") {
+      throw new Error(`${path}: ${field}.parallel must be a boolean`);
+    }
+    task.parallel = record.parallel;
   }
   return task;
 }

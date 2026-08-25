@@ -67,6 +67,46 @@ test("update changes name status and assignee without changing identity", () => 
   });
 });
 
+test("parallel scheduling is parent-only and false returns to the sequential default", () => {
+  let document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
+  document = applyMutation(
+    document,
+    { action: "add", name: "Parallel parent", parallel: true },
+    now,
+    ids("parent"),
+  ).document;
+  assert.equal(document.active[0]?.parallel, true);
+
+  document = applyMutation(
+    document,
+    { action: "update", task: "1", parallel: false },
+    now,
+    ids(),
+  ).document;
+  assert.equal("parallel" in document.active[0]!, false);
+
+  document = applyMutation(document, { action: "add", name: "Child", parent: "1" }, now, ids("child")).document;
+  assert.throws(
+    () => applyMutation(document, { action: "add", name: "Invalid", parent: "1", parallel: true }, now, ids("bad")),
+    /parallel.*parent/i,
+  );
+  assert.throws(
+    () => applyMutation(document, { action: "update", task: "1.1", parallel: false }, now, ids()),
+    /parallel.*parent/i,
+  );
+});
+
+test("completed history preserves explicit parallel provenance", () => {
+  let document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
+  document = applyMutation(document, { action: "add", name: "Updated", parallel: true }, now, ids("updated")).document;
+  document = applyMutation(document, { action: "update", task: "1", status: "completed" }, now, ids()).document;
+  assert.equal(document.completed[0]?.parallel, true);
+
+  document = applyMutation(document, { action: "add", name: "Popped", parallel: true }, now, ids("popped")).document;
+  document = applyMutation(document, { action: "pop" }, now, ids()).document;
+  assert.equal(document.completed[1]?.parallel, true);
+});
+
 // ---------------------------------------------------------------------------
 // Transition builders
 // ---------------------------------------------------------------------------

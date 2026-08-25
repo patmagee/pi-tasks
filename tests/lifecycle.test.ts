@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -288,6 +288,87 @@ test("resume discovery skips corrupt files and reports diagnostics", async (t) =
   assert.deepEqual(result.details.candidates.map((candidate: { id: string }) => candidate.id), [valid.id]);
   assert.equal(result.details.errors.length, 1);
   assert.match(harness.notifications.at(-1)?.message ?? "", /skipped 1 unreadable/i);
+});
+
+test("tool propagates explicit parent parallel scheduling and rejects it for subtasks", async (t) => {
+  const root = await temporaryRoot(t);
+  const harness = createHarness(root);
+  await harness.fire("session_start", { reason: "startup" });
+  const authorizationContract = [
+    harness.tool.parameters.properties.parallel.description,
+    ...harness.tool.promptGuidelines,
+  ].join("\n");
+  assert.match(authorizationContract, /current user message/i);
+  assert.match(authorizationContract, /does not carry forward/i);
+
+  const sequential = await harness.tool.execute(
+    "sequential-add",
+    { action: "add", name: "Sequential", parallel: false },
+    undefined,
+    undefined,
+    harness.ctx,
+  );
+  assert.equal("parallel" in sequential.details.document.active[0], false);
+  const raw = JSON.parse(await readFile(
+    join(root, ".pi", "tasks", `${sequential.details.taskListId}.json`),
+    "utf8",
+  ));
+  assert.equal("parallel" in raw.active[0], false);
+
+  const added = await harness.tool.execute(
+    "parallel-add",
+    { action: "add", name: "Parallel", parallel: true },
+    undefined,
+    undefined,
+    harness.ctx,
+  );
+  assert.equal(added.details.document.active[1].parallel, true);
+
+  const updated = await harness.tool.execute(
+    "sequential-update",
+    { action: "update", task: "2", parallel: false },
+    undefined,
+    undefined,
+    harness.ctx,
+  );
+  assert.equal("parallel" in updated.details.document.active[1], false);
+
+  await assert.rejects(
+    harness.tool.execute(
+      "invalid-subtask-add",
+      { action: "add", name: "Invalid child", parent: "1", parallel: true },
+      undefined,
+      undefined,
+      harness.ctx,
+    ),
+    /parallel.*parent/i,
+  );
+
+  await harness.tool.execute(
+    "valid-subtask-add",
+    { action: "add", name: "Child", parent: "1" },
+    undefined,
+    undefined,
+    harness.ctx,
+  );
+  await assert.rejects(
+    harness.tool.execute(
+      "invalid-subtask-update",
+      { action: "update", task: "1.1", parallel: false },
+      undefined,
+      undefined,
+      harness.ctx,
+    ),
+    /parallel.*parent/i,
+  );
+  const afterRejectedUpdate = await harness.tool.execute(
+    "list-after-rejection",
+    { action: "list" },
+    undefined,
+    undefined,
+    harness.ctx,
+  );
+  assert.equal("parallel" in afterRejectedUpdate.details.document.active[0].subtasks[0], false);
 });
 
 test("tool mutations use fresh visible positions and trim assignees", async (t) => {
