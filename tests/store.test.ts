@@ -194,6 +194,38 @@ test("a stale lock is recovered before mutation", async (t) => {
   assert.equal(result.document.active[0]?.name, "Recovered");
 });
 
+test("a leaked reclaim gate still reaches the lock timeout", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new TaskStore(root);
+  const document = await store.create("session-a");
+  const lockPath = join(store.fileRoot, `${document.id}.lock`);
+  await mkdir(lockPath);
+  await mkdir(`${lockPath}.reclaim`);
+
+  const script = `
+    import { TaskStore } from "./src/store.ts";
+    const { ROOT, ID } = process.env;
+    try {
+      await new TaskStore(ROOT, { staleLockMs: 0, lockTimeoutMs: 30, retryDelayMs: 2 })
+        .mutate(ID, { action: "add", name: "blocked" });
+      process.exit(2);
+    } catch (error) {
+      process.exit(/timed out/i.test(String(error)) ? 0 : 3);
+    }
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    env: { ...process.env, ROOT: root, ID: document.id },
+    stdio: "ignore",
+  });
+  const code = await Promise.race([
+    new Promise<number | null>((resolveExit) => child.once("exit", resolveExit)),
+    new Promise<"hung">((resolveHung) => setTimeout(() => resolveHung("hung"), 500)),
+  ]);
+  if (code === "hung") child.kill();
+  assert.equal(code, 0, "mutation hung instead of reaching lock timeout");
+});
+
 test("two processes reclaiming one stale lock preserve both mutations", async (t) => {
   const root = await temporaryRoot(t);
   const store = new TaskStore(root);

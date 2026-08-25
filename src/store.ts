@@ -283,6 +283,10 @@ export class TaskStore {
         if (!isNodeError(error) || error.code !== "EEXIST") throw error;
         if (await this.isStale(lockPath)) {
           await this.reclaimStaleLock(lockPath);
+          if (Date.now() - startedAt >= this.options.lockTimeoutMs) {
+            throw new Error(`Timed out waiting for task-list lock: ${lockPath}`);
+          }
+          await delay(this.options.retryDelayMs);
           continue;
         }
         if (Date.now() - startedAt >= this.options.lockTimeoutMs) {
