@@ -1,0 +1,126 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import type { TaskListDocument } from "../src/model.ts";
+import {
+  renderAgentSummary,
+  renderFullListLines,
+  renderWidgetLines,
+  type RenderTheme,
+} from "../src/render.ts";
+
+const identityTheme: RenderTheme = {
+  text: (value) => value,
+  accent: (value) => value,
+  muted: (value) => value,
+  success: (value) => value,
+  dim: (value) => value,
+  strikethrough: (value) => value,
+};
+
+function renderFixture(): TaskListDocument {
+  return {
+    version: 1,
+    id: "00000000-0000-4000-8000-000000000001",
+    createdAt: "2026-08-24T12:00:00.000Z",
+    updatedAt: "2026-08-24T12:00:00.000Z",
+    originSessionId: "session-1",
+    active: [
+      {
+        id: "parent",
+        name: "Implement persistence",
+        status: "in_progress",
+        assignee: "store-agent",
+        subtasks: [
+          { id: "atomic", name: "Add atomic writes", status: "completed" },
+          { id: "timeout", name: "Add lock timeout", status: "pending" },
+        ],
+      },
+      { id: "widget", name: "Add task widget", status: "pending", subtasks: [] },
+    ],
+    completed: [
+      {
+        id: "old",
+        name: "Old completed parent",
+        status: "completed",
+        subtasks: [{ id: "old-child", name: "Old child", status: "completed" }],
+      },
+    ],
+  };
+}
+
+function completedOnlyFixture(): TaskListDocument {
+  const document = renderFixture();
+  return { ...document, active: [] };
+}
+
+function longNameFixture(): TaskListDocument {
+  const document = renderFixture();
+  return {
+    ...document,
+    active: [{ ...document.active[0]!, name: "A task name that is much wider than the terminal" }],
+  };
+}
+
+test("widget distinguishes pending in-progress and completed subtasks", () => {
+  const lines = renderWidgetLines(renderFixture(), 120, identityTheme);
+  assert.deepEqual(lines, [
+    "Tasks",
+    "▶ 1 Implement persistence  @store-agent",
+    "  ✓ 1.1 Add atomic writes",
+    "  ○ 1.2 Add lock timeout",
+    "○ 2 Add task widget",
+  ]);
+});
+
+test("widget returns no lines when no active parents exist", () => {
+  assert.deepEqual(renderWidgetLines(completedOnlyFixture(), 80, identityTheme), []);
+});
+
+test("full list separates active and completed parent trees", () => {
+  const lines = renderFullListLines(renderFixture(), 120, identityTheme);
+  assert.deepEqual(lines, [
+    "Active",
+    "▶ 1 Implement persistence  @store-agent",
+    "  ✓ 1.1 Add atomic writes",
+    "  ○ 1.2 Add lock timeout",
+    "○ 2 Add task widget",
+    "",
+    "Completed",
+    "✓ 1 Old completed parent",
+    "  ✓ 1.1 Old child",
+  ]);
+});
+
+test("every rendered line fits the available width", () => {
+  for (const line of [
+    ...renderWidgetLines(longNameFixture(), 24, identityTheme),
+    ...renderFullListLines(longNameFixture(), 24, identityTheme),
+  ]) {
+    assert.ok(visibleWidth(line) <= 24, `${visibleWidth(line)} columns: ${line}`);
+  }
+});
+
+test("rendering selects semantic styles for each state", () => {
+  const theme: RenderTheme = {
+    text: (value) => `<text>${value}</text>`,
+    accent: (value) => `<accent>${value}</accent>`,
+    muted: (value) => `<muted>${value}</muted>`,
+    success: (value) => `<success>${value}</success>`,
+    dim: (value) => `<dim>${value}</dim>`,
+    strikethrough: (value) => `<strike>${value}</strike>`,
+  };
+  const output = renderWidgetLines(renderFixture(), 200, theme).join("\n");
+  assert.match(output, /<accent>▶<\/accent> <accent>1 Implement persistence<\/accent>/);
+  assert.match(output, /<success>✓<\/success> <muted><strike>1\.1 Add atomic writes<\/strike><\/muted>/);
+  assert.match(output, /<dim>○<\/dim> <text>2 Add task widget<\/text>/);
+  assert.match(output, /<muted>@store-agent<\/muted>/);
+});
+
+test("agent summary excludes completed parent history", () => {
+  const summary = renderAgentSummary(renderFixture());
+  assert.match(summary, /1 \[in_progress\] Implement persistence @store-agent/);
+  assert.match(summary, /1\.1 \[completed\] Add atomic writes/);
+  assert.doesNotMatch(summary, /Old completed parent/);
+  assert.equal(renderAgentSummary(completedOnlyFixture()), "");
+});
