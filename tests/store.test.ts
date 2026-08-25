@@ -266,6 +266,27 @@ test("a live owner-initialization marker prevents stale reclaim", async (t) => {
   assert.equal((await store.read(document.id)).active.length, 0);
 });
 
+test("initialization cleanup cannot remove a replacement owner's lock", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new TaskStore(root);
+  const document = await store.create("session-a");
+  const lockPath = join(store.fileRoot, `${document.id}.lock`);
+  await mkdir(lockPath);
+  await writeFile(
+    join(lockPath, "owner.json"),
+    JSON.stringify({ token: "replacement", pid: process.pid, acquiredAt: new Date().toISOString() }),
+    "utf8",
+  );
+  const contenderToken = "contender";
+  await mkdir(join(lockPath, `.owner-${process.pid}-${contenderToken}`));
+
+  const internal = store as unknown as {
+    releaseOwnedLock(path: string, token: string): Promise<void>;
+  };
+  await internal.releaseOwnedLock(lockPath, contenderToken);
+  assert.equal(JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8")).token, "replacement");
+});
+
 test("a leaked reclaim gate still reaches the lock timeout", async (t) => {
   const root = await temporaryRoot(t);
   const store = new TaskStore(root);

@@ -572,7 +572,7 @@ For `<id>.json`, use `<id>.lock` as an atomic lock directory:
 3. On `EEXIST`, inspect lock age, owner metadata, and owner-initialization markers. A live marker prevents reclaim while owner metadata is being written.
 4. Remove an old lock only when its recorded local owner process is no longer alive or valid owner metadata remains absent after the initialization grace period.
 5. Retry until `lockTimeoutMs`, then throw a timeout error.
-6. In `finally`, remove the owned lock only when its token still matches `owner.json`.
+6. In `finally` and initialization-error cleanup, treat completed `owner.json` metadata as authoritative. Remove the lock when its token matches. Only when `owner.json` is absent may the exact token-specific initialization marker authorize removal.
 
 Write JSON to `<id>.<process.pid>.<randomUUID()>.tmp` in the same directory. Flush and close the file handle, rename it over `<id>.json`, then remove any remaining temporary file in `finally`.
 

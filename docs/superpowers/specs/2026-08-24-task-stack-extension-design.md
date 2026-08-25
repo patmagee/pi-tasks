@@ -236,7 +236,7 @@ A bounded lock timeout prevents indefinite waiting. A token-specific marker prot
 
 Within one Pi process, mutations also use Pi's file mutation queue for the resolved task-list path. This preserves call order and coordinates with any built-in file tool that targets the same file.
 
-Discovery and list operations do not write. The strict store API reports unreadable candidate files as one aggregate error. Explicit resume uses tolerant discovery, which retains valid candidate metadata, reports unreadable files without exposing their task contents, and tolerates a file disappearing during the scan.
+Discovery and list operations do not modify task-list files, although first use can create the `.pi/tasks/` storage directory. The strict store API reports unreadable candidate files as one aggregate error. Explicit resume uses tolerant discovery, which retains valid candidate metadata, reports unreadable files without exposing their task contents, and tolerates a file disappearing during the scan.
 
 ## Agent context after compaction
 

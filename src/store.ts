@@ -346,7 +346,7 @@ export class TaskStore {
           await this.writeOwner(lockPath, token);
           ownsLock = true;
         } catch (error) {
-          await rm(lockPath, { recursive: true, force: true });
+          await this.releaseOwnedLock(lockPath, token);
           throw error;
         }
       } catch (error) {
@@ -426,8 +426,8 @@ export class TaskStore {
 
   private async releaseOwnedLock(lockPath: string, token: string): Promise<void> {
     const owner = await this.readOwner(lockPath);
-    if (owner?.token === token) {
-      await rm(lockPath, { recursive: true, force: true });
+    if (owner !== undefined) {
+      if (owner.token === token) await rm(lockPath, { recursive: true, force: true });
       return;
     }
     try {
