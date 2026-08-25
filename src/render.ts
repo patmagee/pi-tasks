@@ -16,22 +16,24 @@ function renderItem(
   indent: string,
   width: number,
   theme: RenderTheme,
+  parallel = false,
 ): string {
   let glyph: string;
   let label: string;
+  const scheduling = parallel ? "∥ " : "";
 
   switch (item.status) {
     case "in_progress":
       glyph = theme.accent("▶");
-      label = theme.accent(`${reference} ${item.name}`);
+      label = theme.accent(`${scheduling}${reference} ${item.name}`);
       break;
     case "completed":
       glyph = theme.success("✓");
-      label = theme.muted(theme.strikethrough(`${reference} ${item.name}`));
+      label = theme.muted(theme.strikethrough(`${scheduling}${reference} ${item.name}`));
       break;
     case "pending":
       glyph = theme.text("○");
-      label = theme.text(`${reference} ${item.name}`);
+      label = theme.text(`${scheduling}${reference} ${item.name}`);
       break;
   }
 
@@ -42,7 +44,7 @@ function renderItem(
 function renderTaskTree(task: Task, index: number, width: number, theme: RenderTheme): string[] {
   const reference = String(index + 1);
   return [
-    renderItem(task, reference, "", width, theme),
+    renderItem(task, reference, "", width, theme, task.parallel === true),
     ...task.subtasks.map((subtask, subtaskIndex) =>
       renderItem(subtask, `${reference}.${subtaskIndex + 1}`, "  ", width, theme),
     ),
@@ -104,8 +106,9 @@ export function renderAgentSummary(document: TaskListDocument): string {
     const scheduling = runnable.has(reference)
       ? parallelWave ? "runnable parallel wave" : "runnable"
       : "blocked by order";
+    const marker = task.parallel === true ? " ∥" : "";
     const assignee = task.assignee === undefined ? "" : ` assignee=${serializeAgentData(task.assignee)}`;
-    lines.push(`${reference} [${scheduling}] [${task.status}] name=${serializeAgentData(task.name)}${assignee}`);
+    lines.push(`${reference}${marker} [${scheduling}] [${task.status}] name=${serializeAgentData(task.name)}${assignee}`);
     for (const [subtaskIndex, subtask] of task.subtasks.entries()) {
       const subtaskAssignee = subtask.assignee === undefined
         ? ""

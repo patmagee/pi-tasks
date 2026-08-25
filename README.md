@@ -37,8 +37,8 @@ Ask the agent to manage tasks. The extension provides one agent tool named `task
 
 | Action | Result |
 | --- | --- |
-| `add` | Add a parent task or one-level subtask. The first add in an unattached session creates a new list. |
-| `update` | Change a task name, status, or assignee. An empty assignee clears it. |
+| `add` | Add a parent task or one-level subtask. The first add in an unattached session creates a new list. Parent tasks can be explicitly eligible for parallel execution. |
+| `update` | Change a task name, status, assignee, or parent scheduling. An empty assignee clears it. |
 | `move` | Move an active task to a one-based position in its current level. |
 | `pop` | Complete active parent task `1`. All of its subtasks must be complete. |
 | `delete` | Permanently remove an active or completed task. |
@@ -57,11 +57,34 @@ Pop the first task.
 Delete completed task 1 permanently.
 Show the full task list.
 Find previous task lists in this repository, then resume the one I select.
+Add "Check Linux", "Check macOS", and "Check Windows" as parallel parent tasks. Run them as one parallel wave.
+Change task 2 back to sequential execution.
 ```
 
 The agent should discover candidates before it resumes previous work. Discovery does not attach a list. A selected list identifier is required for attachment.
 
 Do not send dependent numbered changes in parallel. A completion, move, or deletion can renumber later tasks.
+
+## Execution order and parallel waves
+
+The attached stack is the agent's default work scope. If your current message gives a separate direct instruction, that instruction overrides stack work for one turn. Stack-first behavior resumes on the next turn.
+
+Parent tasks are sequential by default. The agent can mark a parent task as parallel only when your current message explicitly authorizes parallel execution. This authorization does not carry forward. Subtasks always remain ordered within their parent.
+
+A parallel wave is the contiguous group of parallel parents at the front of the active list. The first sequential parent is a barrier. It and all later parents wait until the current wave completes.
+
+For example, given this list:
+
+```text
+1 ∥ Check Linux
+2 ∥ Check macOS
+3 Publish results
+4 ∥ Notify teams
+```
+
+Tasks 1 and 2 form the current wave. Task 3 then runs alone. Task 4 waits until task 3 completes.
+
+The `∥` marker shows parents that have explicit parallel eligibility. It does not mark subtasks. Parallel eligibility does not override safety or real dependencies. If concurrent execution is unsafe or unavailable, the agent runs eligible work sequentially and explains why.
 
 ## View the full list
 

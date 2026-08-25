@@ -321,17 +321,21 @@ test("update rejects a reference after the task has been archived", () => {
   );
 });
 
-test("formatPlainList uses distinct glyphs and renders the completed section", () => {
+test("formatPlainList marks only parallel parents in active and completed sections", () => {
   let document = createTaskList("00000000-0000-4000-8000-000000000001", "session-1", now);
-  document = applyMutation(document, { action: "add", name: "Working" }, now, ids("w")).document;
+  document = applyMutation(document, { action: "add", name: "Working", parallel: true }, now, ids("w")).document;
   document = applyMutation(document, { action: "update", task: "1", status: "in_progress" }, now, ids()).document;
-  document = applyMutation(document, { action: "add", name: "Done" }, now, ids("d")).document;
-  document = applyMutation(document, { action: "update", task: "2", status: "completed" }, now, ids()).document;
+  document = applyMutation(document, { action: "add", name: "Child", parent: "1" }, now, ids("child")).document;
+  document = applyMutation(document, { action: "add", name: "Sequential" }, now, ids("s")).document;
+  document = applyMutation(document, { action: "add", name: "Done", parallel: true }, now, ids("d")).document;
+  document = applyMutation(document, { action: "update", task: "3", status: "completed" }, now, ids()).document;
   const output = formatPlainList(document, true);
-  assert.match(output, /◑ Working/);
+  assert.match(output, /1\. ◑ ∥ Working/);
+  assert.match(output, /1\.1 ○ Child/);
+  assert.doesNotMatch(output, /∥ Child|∥ Sequential/);
   assert.match(output, /Completed/);
-  assert.match(output, /✓ Done/);
-  assert.equal(output.indexOf("Completed") < output.indexOf("✓ Done"), true);
+  assert.match(output, /1\. ✓ ∥ Done/);
+  assert.equal(output.indexOf("Completed") < output.indexOf("✓ ∥ Done"), true);
 });
 
 test("invalid names references and positions do not mutate the source", () => {

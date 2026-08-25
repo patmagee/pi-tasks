@@ -228,7 +228,8 @@ export function formatPlainList(document: TaskListDocument, includeCompleted = f
   const lines: string[] = [];
 
   const renderTask = (task: Task, n: number): void => {
-    lines.push(`${n}. ${STATUS_GLYPH[task.status]} ${task.name}`);
+    const scheduling = task.parallel === true ? " ∥" : "";
+    lines.push(`${n}. ${STATUS_GLYPH[task.status]}${scheduling} ${task.name}`);
     task.subtasks.forEach((sub, si) => {
       lines.push(`  ${n}.${si + 1} ${STATUS_GLYPH[sub.status]} ${sub.name}`);
     });
