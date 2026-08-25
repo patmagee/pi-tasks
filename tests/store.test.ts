@@ -191,6 +191,7 @@ test("discover reports malformed candidate files without returning partial resul
   assert.deepEqual(available.candidates.map((candidate) => candidate.id), [valid.id]);
   assert.equal(available.errors.length, 1);
   assert.match(available.errors[0] ?? "", new RegExp(malformedId));
+  assert.doesNotMatch(available.errors[0] ?? "", /not-json/);
 });
 
 test("lock timeout leaves the current document unchanged", async (t) => {
@@ -234,6 +235,27 @@ test("a live process lock is never reclaimed only because of age", async (t) => 
     JSON.stringify({ token: "live-owner", pid: child.pid, acquiredAt: new Date(0).toISOString() }),
     "utf8",
   );
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+
+  await assert.rejects(
+    store.mutate(document.id, { action: "add", name: "Must wait" }),
+    /timed out.*lock/i,
+  );
+  assert.equal((await store.read(document.id)).active.length, 0);
+});
+
+test("a live owner-initialization marker prevents stale reclaim", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new TaskStore(root, { lockTimeoutMs: 30, retryDelayMs: 5, staleLockMs: 0 });
+  const document = await store.create("session-a");
+  const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"]);
+  t.after(() => child.kill());
+  assert.notEqual(child.pid, undefined);
+
+  const lockPath = join(store.fileRoot, `${document.id}.lock`);
+  await mkdir(lockPath);
+  await mkdir(join(lockPath, `.owner-${child.pid}-initializing`));
   const old = new Date(Date.now() - 60_000);
   await utimes(lockPath, old, old);
 

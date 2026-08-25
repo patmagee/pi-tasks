@@ -69,6 +69,11 @@ interface LockOwner {
   acquiredAt: string;
 }
 
+interface ScanFailure {
+  fileName: string;
+  error: Error;
+}
+
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error;
 }
@@ -228,6 +233,23 @@ export class TaskStore {
     );
   }
 
+  async createWithMutation(
+    originSessionId: string,
+    operation: MutationOperation,
+    nextId: IdFactory = randomUUID,
+  ): Promise<MutationResult> {
+    const id = randomUUID();
+    const path = this.filePath(id);
+    return withFileMutationQueue(path, async () =>
+      this.withLock(id, async () => {
+        const now = this.options.now().toISOString();
+        const result = applyMutation(createTaskList(id, originSessionId, now), operation, now, nextId);
+        await this.writeAtomic(path, result.document);
+        return result;
+      }),
+    );
+  }
+
   async read(id: string): Promise<TaskListDocument> {
     return readDocument(this.filePath(id), id);
   }
@@ -235,7 +257,7 @@ export class TaskStore {
   async discover(): Promise<TaskListCandidate[]> {
     const { documents, errors } = await this.scanDocuments();
     if (errors.length > 0) {
-      throw new AggregateError(errors, `Could not discover task lists in ${this.fileRoot}`);
+      throw new AggregateError(errors.map((failure) => failure.error), `Could not discover task lists in ${this.fileRoot}`);
     }
     return this.toCandidates(documents);
   }
@@ -244,7 +266,7 @@ export class TaskStore {
     const { documents, errors } = await this.scanDocuments();
     return {
       candidates: this.toCandidates(documents),
-      errors: errors.map((error) => error.message),
+      errors: errors.map((failure) => `Unreadable task-list candidate: ${failure.fileName}`),
     };
   }
 
@@ -269,11 +291,11 @@ export class TaskStore {
     return join(this.fileRoot, `${id}.json`);
   }
 
-  private async scanDocuments(): Promise<{ documents: TaskListDocument[]; errors: Error[] }> {
+  private async scanDocuments(): Promise<{ documents: TaskListDocument[]; errors: ScanFailure[] }> {
     await mkdir(this.fileRoot, { recursive: true });
     const entries = await readdir(this.fileRoot, { withFileTypes: true });
     const documents: TaskListDocument[] = [];
-    const errors: Error[] = [];
+    const errors: ScanFailure[] = [];
     await Promise.all(
       entries
         .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
@@ -283,7 +305,10 @@ export class TaskStore {
             assertTaskListId(id);
             documents.push(await readDocument(join(this.fileRoot, entry.name), id));
           } catch (error) {
-            errors.push(error instanceof Error ? error : new Error(String(error)));
+            errors.push({
+              fileName: entry.name,
+              error: error instanceof Error ? error : new Error(String(error)),
+            });
           }
         }),
     );
@@ -317,6 +342,7 @@ export class TaskStore {
       try {
         await mkdir(lockPath);
         try {
+          await mkdir(this.ownerMarkerPath(lockPath, token));
           await this.writeOwner(lockPath, token);
           ownsLock = true;
         } catch (error) {
@@ -353,8 +379,9 @@ export class TaskStore {
       const age = Date.now() - lockStat.mtimeMs;
       if (age < this.options.staleLockMs) return false;
       const owner = await this.readOwner(lockPath);
-      if (owner === undefined) return age >= Math.max(this.options.staleLockMs, OWNER_INITIALIZATION_GRACE_MS);
-      return !this.isProcessAlive(owner.pid);
+      if (owner !== undefined) return !this.isProcessAlive(owner.pid);
+      if (await this.hasLiveOwnerMarker(lockPath)) return false;
+      return age >= Math.max(this.options.staleLockMs, OWNER_INITIALIZATION_GRACE_MS);
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") return false;
       throw error;
@@ -379,9 +406,36 @@ export class TaskStore {
     }
   }
 
+  private ownerMarkerPath(lockPath: string, token: string): string {
+    return join(lockPath, `.owner-${process.pid}-${token}`);
+  }
+
+  private async hasLiveOwnerMarker(lockPath: string): Promise<boolean> {
+    try {
+      const entries = await readdir(lockPath, { withFileTypes: true });
+      return entries.some((entry) => {
+        if (!entry.isDirectory()) return false;
+        const match = /^\.owner-(\d+)-.+$/.exec(entry.name);
+        return match !== null && this.isProcessAlive(Number(match[1]));
+      });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
   private async releaseOwnedLock(lockPath: string, token: string): Promise<void> {
     const owner = await this.readOwner(lockPath);
-    if (owner?.token === token) await rm(lockPath, { recursive: true, force: true });
+    if (owner?.token === token) {
+      await rm(lockPath, { recursive: true, force: true });
+      return;
+    }
+    try {
+      await stat(this.ownerMarkerPath(lockPath, token));
+      await rm(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+    }
   }
 
   private async readOwner(lockPath: string): Promise<LockOwner | undefined> {

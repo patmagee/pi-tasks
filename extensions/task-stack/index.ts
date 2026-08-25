@@ -192,9 +192,12 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
 
   async function restoreAttachment(ctx: ExtensionContext): Promise<void> {
     store ??= await createStore(ctx);
+    const previousAttachmentId = attachmentId;
+    const previousDocument = document;
     attachmentId = findLatestAttachment(ctx.sessionManager.getBranch());
-    document = undefined;
-    if (attachmentId !== undefined) {
+    if (attachmentId === undefined) {
+      document = undefined;
+    } else {
       try {
         document = await store.read(attachmentId);
       } catch (error) {
@@ -202,6 +205,9 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
         if (error instanceof TaskListNotFoundError) {
           appendAttachment(null);
           attachmentId = undefined;
+          document = undefined;
+        } else {
+          document = attachmentId === previousAttachmentId ? previousDocument : undefined;
         }
         ctx.ui.notify(`Could not restore task stack: ${message}`, "error");
       }
@@ -312,10 +318,9 @@ export default function taskStackExtension(pi: ExtensionAPI): void {
         if (operation.action !== "add") {
           throw new Error("No task list is attached. Add a task to start a new list or ask to resume previous tasks.");
         }
-        const created = await store.create(ctx.sessionManager.getSessionId());
-        const result = await store.mutate(created.id, operation);
-        appendAttachment(created.id);
-        attachmentId = created.id;
+        const result = await store.createWithMutation(ctx.sessionManager.getSessionId(), operation);
+        appendAttachment(result.document.id);
+        attachmentId = result.document.id;
         document = result.document;
         refreshWidget(ctx);
         return {

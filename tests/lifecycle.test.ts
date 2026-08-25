@@ -129,6 +129,19 @@ test("turn prompt adds active tasks only while attached", () => {
   assert.match(prompt, /1 \[pending\] Work/);
 });
 
+test("invalid first add leaves no persisted task list", async (t) => {
+  const root = await temporaryRoot(t);
+  const harness = createHarness(root);
+  await harness.fire("session_start", { reason: "startup" });
+
+  await assert.rejects(
+    harness.tool.execute("bad-add", { action: "add", name: "Invalid", position: 2 }, undefined, undefined, harness.ctx),
+    /position/i,
+  );
+  assert.equal(harness.entries.length, 0);
+  assert.deepEqual(await new TaskStore(root).discover(), []);
+});
+
 test("first add attaches a list and pop removes the final widget", async (t) => {
   const root = await temporaryRoot(t);
   const harness = createHarness(root);
@@ -203,6 +216,22 @@ test("transient refresh errors keep the attachment and last valid widget", async
   assert.equal(harness.entries.length, 1);
   assert.equal(typeof harness.widget, "function");
   assert.match(harness.notifications.at(-1)?.message ?? "", /could not refresh task stack/i);
+});
+
+test("tree restore errors keep the last valid widget for the same attachment", async (t) => {
+  const root = await temporaryRoot(t);
+  const harness = createHarness(root);
+  await harness.fire("session_start", { reason: "startup" });
+  const added = await harness.tool.execute("add", { action: "add", name: "Keep on tree" }, undefined, undefined, harness.ctx);
+  await writeFile(
+    join(root, ".pi", "tasks", `${added.details.taskListId}.json`),
+    JSON.stringify({ version: 2, id: added.details.taskListId }),
+    "utf8",
+  );
+
+  await harness.fire("session_tree", {});
+  assert.equal(findLatestAttachment(harness.entries), added.details.taskListId);
+  assert.equal(typeof harness.widget, "function");
 });
 
 test("invalid file during session restore does not write a detach marker", async (t) => {

@@ -99,7 +99,7 @@ Reloading or reopening the same session restores its attachment. A fork inherits
 
 Navigating the session tree restores the attachment marker at that point. It does not rewind task changes. The current `.pi/tasks/<task-list-id>.json` file remains canonical.
 
-If an attached file is missing or invalid, the extension detaches it, removes the widget, and reports the error. It does not silently select another list.
+If an attached file is missing, the extension detaches it, removes the widget, and reports the error. Other read errors keep the attachment and report the problem without silently selecting another list.
 
 ## Concurrent access
 
